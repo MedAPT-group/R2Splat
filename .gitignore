@@ -1,0 +1,30 @@
+# ============== Python 相关忽略 ==============
+# Python 缓存文件夹
+__pycache__/
+# Python 编译文件
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# ============== 你的项目专属文件 ==============
+# 项目打包信息（你目录里已有的 gsplat2ct.egg-info）
+*.egg-info/
+gsplat2ct.egg-info/
+
+# ============== CUDA / C++ 编译文件 ==============
+# CUDA 编译产物
+csrc/build/
+*.o
+*.cu.o
+build/
+dist/
+
+# ============== 编辑器 / 系统临时文件 ==============
+# VS Code / PyCharm
+.vscode/
+.idea/
+# Mac 系统文件
+.DS_Store
+# 日志文件
+*.log

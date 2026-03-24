@@ -1,0 +1,257 @@
+/**
+ * @file ConicsMu.cpp
+ * @brief C++ Tensor Wrapper for Conics & Mu Computation (with Blur)
+ * 
+ * Provides the C++ tensor wrapper functions that:
+ * 1. Validate input tensors (CUDA, contiguous, shape)
+ * 2. Allocate output tensors
+ * 3. Dispatch to type-specific CUDA kernels
+ * 
+ * Input shape: [C, N, 6] — C cameras, N Gaussians, 6 upper-triangular elements
+ * Output conics shape: [C, N, 3] — (hat{Sigma}_b)^{-1}
+ * Output mu shape: [C, N] — sqrt(2*pi * det(tilde{Sigma}_b) / det(hat{Sigma}_b))
+ * 
+ * The forward pass applies blur (eps * I) to the covariance before inversion.
+ * The backward pass recomputes cov3d_inv = (tilde{Sigma}_b)^{-1} locally from
+ * the original cov2d_3x3 and eps, avoiding extra memory allocation in forward.
+ * 
+ * Following gsplat2ct's pattern for tensor handling.
+ * 
+ * Author: Dy164
+ * Date: 2026-02-10
+ */
+
+#include "ConicsMu.h"
+#include "../include/Ops.h"
+#include <torch/extension.h>
+
+namespace gsplat2ct {
+
+// ============================================================================
+// Forward Pass Tensor Interface
+// ============================================================================
+
+std::tuple<torch::Tensor, torch::Tensor>
+conics_mu_fwd_tensor(
+    const torch::Tensor& cov2d_3x3,   // [C, N, 6]
+    double eps                          // blur epsilon
+) {
+    GSPLAT2CT_DEVICE_GUARD(cov2d_3x3);
+    GSPLAT2CT_CHECK_INPUT(cov2d_3x3);
+
+    // Validate dimensions
+    TORCH_CHECK(cov2d_3x3.dim() == 3,
+                "cov2d_3x3 must be 3D [C, N, 6], got dim=", cov2d_3x3.dim());
+    TORCH_CHECK(cov2d_3x3.size(2) == 6,
+                "cov2d_3x3 last dim must be 6, got ", cov2d_3x3.size(2));
+
+    const int64_t C = cov2d_3x3.size(0);
+    const int64_t N = cov2d_3x3.size(1);
+    const uint32_t total = static_cast<uint32_t>(C * N);
+
+    // Allocate outputs
+    torch::Tensor conics = torch::empty(
+        {C, N, 3}, cov2d_3x3.options());
+    torch::Tensor mus = torch::empty(
+        {C, N}, cov2d_3x3.options());
+
+    if (total == 0) {
+        return std::make_tuple(conics, mus);
+    }
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    AT_DISPATCH_FLOATING_TYPES(
+        cov2d_3x3.scalar_type(),
+        "conics_mu_fwd",
+        [&]() {
+            launch_conics_mu_fwd<scalar_t>(
+                cov2d_3x3.data_ptr<scalar_t>(),
+                static_cast<scalar_t>(eps),
+                conics.data_ptr<scalar_t>(),
+                mus.data_ptr<scalar_t>(),
+                total,
+                stream
+            );
+        }
+    );
+
+    return std::make_tuple(conics, mus);
+}
+
+// ============================================================================
+// First-Order Backward Pass Tensor Interface
+// ============================================================================
+
+torch::Tensor
+conics_mu_bwd_tensor(
+    const torch::Tensor& cov2d_3x3,   // [C, N, 6]  (forward input, needed for recomputation)
+    double eps,                         // blur epsilon (same value as forward)
+    const torch::Tensor& conics,       // [C, N, 3]
+    const torch::Tensor& mus,          // [C, N]
+    const torch::Tensor& v_conics,     // [C, N, 3]
+    const torch::Tensor& v_mus         // [C, N]
+) {
+    GSPLAT2CT_DEVICE_GUARD(cov2d_3x3);
+    GSPLAT2CT_CHECK_INPUT(cov2d_3x3);
+    GSPLAT2CT_CHECK_INPUT(conics);
+    GSPLAT2CT_CHECK_INPUT(mus);
+    GSPLAT2CT_CHECK_INPUT(v_conics);
+    GSPLAT2CT_CHECK_INPUT(v_mus);
+
+    // Validate dimensions
+    TORCH_CHECK(cov2d_3x3.dim() == 3,
+                "cov2d_3x3 must be 3D [C, N, 6]");
+    TORCH_CHECK(conics.dim() == 3,
+                "conics must be 3D [C, N, 3]");
+    TORCH_CHECK(mus.dim() == 2,
+                "mus must be 2D [C, N]");
+    TORCH_CHECK(v_conics.dim() == 3,
+                "v_conics must be 3D [C, N, 3]");
+    TORCH_CHECK(v_mus.dim() == 2,
+                "v_mus must be 2D [C, N]");
+
+    const int64_t C = cov2d_3x3.size(0);
+    const int64_t N = cov2d_3x3.size(1);
+    const uint32_t total = static_cast<uint32_t>(C * N);
+
+    // Validate shape consistency
+    TORCH_CHECK(cov2d_3x3.size(2) == 6,
+                "cov2d_3x3 last dim must be 6");
+    TORCH_CHECK(conics.size(0) == C && conics.size(1) == N && conics.size(2) == 3,
+                "conics shape must be [C, N, 3]");
+    TORCH_CHECK(mus.size(0) == C && mus.size(1) == N,
+                "mus shape must be [C, N]");
+    TORCH_CHECK(v_conics.size(0) == C && v_conics.size(1) == N && v_conics.size(2) == 3,
+                "v_conics shape must be [C, N, 3]");
+    TORCH_CHECK(v_mus.size(0) == C && v_mus.size(1) == N,
+                "v_mus shape must be [C, N]");
+
+    // Allocate output gradient
+    torch::Tensor v_cov2d_3x3 = torch::empty(
+        {C, N, 6}, cov2d_3x3.options());
+
+    if (total == 0) {
+        return v_cov2d_3x3;
+    }
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    AT_DISPATCH_FLOATING_TYPES(
+        cov2d_3x3.scalar_type(),
+        "conics_mu_bwd",
+        [&]() {
+            launch_conics_mu_bwd<scalar_t>(
+                cov2d_3x3.data_ptr<scalar_t>(),
+                static_cast<scalar_t>(eps),
+                conics.data_ptr<scalar_t>(),
+                mus.data_ptr<scalar_t>(),
+                v_conics.data_ptr<scalar_t>(),
+                v_mus.data_ptr<scalar_t>(),
+                v_cov2d_3x3.data_ptr<scalar_t>(),
+                total,
+                stream
+            );
+        }
+    );
+
+    return v_cov2d_3x3;
+}
+
+// ============================================================================
+// Second-Order Backward Pass Tensor Interface
+// ============================================================================
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+conics_mu_bwd2_tensor(
+    const torch::Tensor& cov2d_3x3,          // [C, N, 6]
+    double eps,
+    const torch::Tensor& conics,             // [C, N, 3]
+    const torch::Tensor& mus,                // [C, N]
+    // downstream first-order gradients
+    const torch::Tensor& v_conics,           // [C, N, 3]
+    const torch::Tensor& v_mus,              // [C, N]
+    // downstream phi-phi Hessian
+    const torch::Tensor& h_conics,           // [C, N, 6]
+    const torch::Tensor& h_conics_mu,        // [C, N, 3]
+    const torch::Tensor& h_mu_mu,            // [C, N]
+    // downstream phi-psi cross Hessian
+    const torch::Tensor& h_means2d_conics,   // [C, N, 6]
+    const torch::Tensor& h_conics_opacity,   // [C, N, 3]
+    const torch::Tensor& h_mu_means2d,       // [C, N, 2]
+    const torch::Tensor& h_mu_opacity        // [C, N]
+) {
+    GSPLAT2CT_DEVICE_GUARD(cov2d_3x3);
+    GSPLAT2CT_CHECK_INPUT(cov2d_3x3);
+    GSPLAT2CT_CHECK_INPUT(conics);
+    GSPLAT2CT_CHECK_INPUT(mus);
+    GSPLAT2CT_CHECK_INPUT(v_conics);
+    GSPLAT2CT_CHECK_INPUT(v_mus);
+    GSPLAT2CT_CHECK_INPUT(h_conics);
+    GSPLAT2CT_CHECK_INPUT(h_conics_mu);
+    GSPLAT2CT_CHECK_INPUT(h_mu_mu);
+    GSPLAT2CT_CHECK_INPUT(h_means2d_conics);
+    GSPLAT2CT_CHECK_INPUT(h_conics_opacity);
+    GSPLAT2CT_CHECK_INPUT(h_mu_means2d);
+    GSPLAT2CT_CHECK_INPUT(h_mu_opacity);
+
+    // Validate dimensions
+    TORCH_CHECK(cov2d_3x3.dim() == 3 && cov2d_3x3.size(2) == 6,
+                "cov2d_3x3 must be 3D [C, N, 6]");
+    TORCH_CHECK(conics.dim() == 3 && conics.size(2) == 3,
+                "conics must be 3D [C, N, 3]");
+    TORCH_CHECK(mus.dim() == 2,
+                "mus must be 2D [C, N]");
+
+    const int64_t C = cov2d_3x3.size(0);
+    const int64_t N = cov2d_3x3.size(1);
+    const uint32_t total = static_cast<uint32_t>(C * N);
+
+    // Allocate outputs
+    torch::Tensor v_cov2d_3x3 = torch::empty(
+        {C, N, 6}, cov2d_3x3.options());
+    torch::Tensor h_cov_cov = torch::empty(
+        {C, N, 21}, cov2d_3x3.options());
+    torch::Tensor h_cov_means2d = torch::empty(
+        {C, N, 12}, cov2d_3x3.options());
+    torch::Tensor h_cov_opacity = torch::empty(
+        {C, N, 6}, cov2d_3x3.options());
+
+    if (total == 0) {
+        return std::make_tuple(v_cov2d_3x3, h_cov_cov, h_cov_means2d, h_cov_opacity);
+    }
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    AT_DISPATCH_FLOATING_TYPES(
+        cov2d_3x3.scalar_type(),
+        "conics_mu_bwd2",
+        [&]() {
+            launch_conics_mu_bwd2<scalar_t>(
+                cov2d_3x3.data_ptr<scalar_t>(),
+                static_cast<scalar_t>(eps),
+                conics.data_ptr<scalar_t>(),
+                mus.data_ptr<scalar_t>(),
+                v_conics.data_ptr<scalar_t>(),
+                v_mus.data_ptr<scalar_t>(),
+                h_conics.data_ptr<scalar_t>(),
+                h_conics_mu.data_ptr<scalar_t>(),
+                h_mu_mu.data_ptr<scalar_t>(),
+                h_means2d_conics.data_ptr<scalar_t>(),
+                h_conics_opacity.data_ptr<scalar_t>(),
+                h_mu_means2d.data_ptr<scalar_t>(),
+                h_mu_opacity.data_ptr<scalar_t>(),
+                v_cov2d_3x3.data_ptr<scalar_t>(),
+                h_cov_cov.data_ptr<scalar_t>(),
+                h_cov_means2d.data_ptr<scalar_t>(),
+                h_cov_opacity.data_ptr<scalar_t>(),
+                total,
+                stream
+            );
+        }
+    );
+
+    return std::make_tuple(v_cov2d_3x3, h_cov_cov, h_cov_means2d, h_cov_opacity);
+}
+
+} // namespace gsplat2ct
