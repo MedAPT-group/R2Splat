@@ -137,19 +137,19 @@ std::tuple<
  * @param prediction Predicted images (B, H, W)
  * @param target Target images (B, H, W)
  * @param window_size SSIM window size (odd number, typically 11)
- * @param lambda_l1 Weight for L1 loss
+ * @param lambda_l2 Weight for L2 loss ((pred - target)^2)
  * @param lambda_ssim Weight for D-SSIM loss
  * @param compute_statistics Whether to save statistics for backward pass
  * 
  * @return std::tuple with:
  *   - loss: Combined scalar loss
- *   - l1_loss: L1 component
+ *   - l2_loss: L2 component
  *   - ssim_loss: D-SSIM component (1 - SSIM)
  *   - mu_r, mu_m, f1, f2, f3, f4: Statistics (if compute_statistics=True)
  */
 std::tuple<
     torch::Tensor,  // loss
-    torch::Tensor,  // l1_loss
+    torch::Tensor,  // l2_loss
     torch::Tensor,  // ssim_loss
     torch::Tensor,  // mu_r
     torch::Tensor,  // mu_m
@@ -161,7 +161,7 @@ std::tuple<
     const torch::Tensor& prediction,
     const torch::Tensor& target,
     int window_size,
-    float lambda_l1,
+    float lambda_l2,
     float lambda_ssim,
     bool compute_statistics
 );
@@ -169,7 +169,7 @@ std::tuple<
 /**
  * Image Loss Backward Pass
  * 
- * Computes gradient of combined L1 + D-SSIM loss w.r.t. prediction.
+ * Computes gradient of combined L2 + D-SSIM loss w.r.t. prediction.
  * Uses pixel-parallel strategy for conflict-free gradient computation.
  * 
  * @param prediction Predicted images (B, H, W)
@@ -177,7 +177,7 @@ std::tuple<
  * @param mu_r, mu_m, f1, f2, f3, f4 Statistics from forward pass
  * @param grad_output Incoming gradient (scalar, typically 1.0)
  * @param window_size SSIM window size
- * @param lambda_l1 Weight for L1 loss
+ * @param lambda_l2 Weight for L2 loss
  * @param lambda_ssim Weight for D-SSIM loss
  * 
  * @return grad_pred: Gradient w.r.t. prediction (B, H, W)
@@ -193,7 +193,7 @@ torch::Tensor image_loss_bwd(
     const torch::Tensor& f4,
     const torch::Tensor& grad_output,
     int window_size,
-    float lambda_l1,
+    float lambda_l2,
     float lambda_ssim
 );
 
@@ -201,7 +201,7 @@ torch::Tensor image_loss_bwd(
  * Image Loss Second-Order Backward Pass
  * 
  * Computes diagonal Hessian of D-SSIM loss w.r.t. prediction.
- * L1 contributes zero to Hessian (piecewise linear).
+ * L2 contributes constant diagonal Hessian (same curvature per pixel).
  * 
  * @param Same as image_loss_bwd
  * 
@@ -218,7 +218,7 @@ torch::Tensor image_loss_bwd2(
     const torch::Tensor& f4,
     const torch::Tensor& grad_output,
     int window_size,
-    float lambda_l1,
+    float lambda_l2,
     float lambda_ssim
 );
 

@@ -38,7 +38,7 @@ void launch_image_loss_fwd(
     const S* __restrict__ prediction,       // (B, H, W)
     const S* __restrict__ target,           // (B, H, W)
     const S* __restrict__ gaussian_window,  // (window_size, window_size)
-    S* __restrict__ l1_map,                 // (B, H, W) - |pred - target|
+    S* __restrict__ l2_map,                 // (B, H, W) - (pred - target)^2
     S* __restrict__ mu_r,                   // (B, H, W) - optional
     S* __restrict__ mu_m,                   // (B, H, W) - optional
     S* __restrict__ f1,                     // (B, H, W) - optional
@@ -79,7 +79,7 @@ void launch_image_loss_bwd(
     S* __restrict__ grad_pred,              // (B, H, W) - combined gradient
     int B, int H, int W,
     int window_size,
-    S lambda_l1,
+    S lambda_l2,
     S lambda_ssim,
     S C1, S C2,
     cudaStream_t stream
@@ -112,7 +112,7 @@ void launch_image_loss_bwd2(
     S* __restrict__ hessian_diag,           // (B, H, W) - SSIM diagonal Hessian
     int B, int H, int W,
     int window_size,
-    S lambda_l1,
+    S lambda_l2,
     S lambda_ssim,
     S C1, S C2,
     cudaStream_t stream

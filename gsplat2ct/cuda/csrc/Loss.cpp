@@ -54,7 +54,7 @@ image_loss_fwd(
     const torch::Tensor& prediction,      // (B, H, W)
     const torch::Tensor& target,          // (B, H, W)
     int window_size,
-    float lambda_l1,
+    float lambda_l2,
     float lambda_ssim,
     bool compute_statistics
 ) {
@@ -79,7 +79,7 @@ image_loss_fwd(
     
     // Allocate outputs
     auto options = prediction.options();
-    auto l1_map = torch::empty({B, H, W}, options);
+    auto l2_map = torch::empty({B, H, W}, options);
     auto ssim_map = torch::empty({B, H, W}, options);
     
     // Optional statistics for backward reuse
@@ -109,7 +109,7 @@ image_loss_fwd(
             prediction.data_ptr<scalar_t>(),
             target.data_ptr<scalar_t>(),
             gaussian.data_ptr<scalar_t>(),
-            l1_map.data_ptr<scalar_t>(),
+            l2_map.data_ptr<scalar_t>(),
             compute_statistics ? mu_r.data_ptr<scalar_t>() : nullptr,
             compute_statistics ? mu_m.data_ptr<scalar_t>() : nullptr,
             compute_statistics ? f1.data_ptr<scalar_t>() : nullptr,
@@ -124,12 +124,12 @@ image_loss_fwd(
     });
     
     // Compute scalar losses
-    auto l1_loss = l1_map.mean();
+    auto l2_loss = l2_map.mean();
     auto ssim_loss = (1.0f - ssim_map.mean());  // D-SSIM
-    auto loss = lambda_l1 * l1_loss + lambda_ssim * ssim_loss;
+    auto loss = lambda_l2 * l2_loss + lambda_ssim * ssim_loss;
     
     return std::make_tuple(
-        loss, l1_loss, ssim_loss,
+        loss, l2_loss, ssim_loss,
         mu_r, mu_m, f1, f2, f3, f4
     );
 }
@@ -149,7 +149,7 @@ torch::Tensor image_loss_bwd(
     const torch::Tensor& f4,              // (B, H, W)
     const torch::Tensor& grad_output,     // scalar
     int window_size,
-    float lambda_l1,
+    float lambda_l2,
     float lambda_ssim
 ) {
     GSPLAT2CT_CHECK_INPUT(prediction);
@@ -188,7 +188,7 @@ torch::Tensor image_loss_bwd(
             grad_output.data_ptr<scalar_t>(),
             grad_pred.data_ptr<scalar_t>(),
             B, H, W, window_size,
-            static_cast<scalar_t>(lambda_l1),
+            static_cast<scalar_t>(lambda_l2),
             static_cast<scalar_t>(lambda_ssim),
             static_cast<scalar_t>(C1),
             static_cast<scalar_t>(C2),
@@ -214,7 +214,7 @@ torch::Tensor image_loss_bwd2(
     const torch::Tensor& f4,              // (B, H, W)
     const torch::Tensor& grad_output,     // scalar
     int window_size,
-    float lambda_l1,
+    float lambda_l2,
     float lambda_ssim
 ) {
     GSPLAT2CT_CHECK_INPUT(prediction);
@@ -253,7 +253,7 @@ torch::Tensor image_loss_bwd2(
             grad_output.data_ptr<scalar_t>(),
             hessian_diag.data_ptr<scalar_t>(),
             B, H, W, window_size,
-            static_cast<scalar_t>(lambda_l1),
+            static_cast<scalar_t>(lambda_l2),
             static_cast<scalar_t>(lambda_ssim),
             static_cast<scalar_t>(C1),
             static_cast<scalar_t>(C2),

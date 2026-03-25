@@ -359,7 +359,7 @@ void launch_image_loss_bwd(
     S* __restrict__ grad_pred,
     int B, int H, int W,
     int window_size,
-    S lambda_l1,
+    S lambda_l2,
     S lambda_ssim,
     S C1, S C2,
     cudaStream_t stream
@@ -373,7 +373,7 @@ void launch_image_loss_bwd(
     
     // Kernel 1: L2 gradient
     compute_l2_grad_kernel<S><<<blocks, threads, 0, stream>>>(
-        prediction, target, grad_output, grad_pred, lambda_l1, total_pixels
+        prediction, target, grad_output, grad_pred, lambda_l2, total_pixels
     );
     
     // Kernel 2: SSIM gradient (pixel-parallel)
@@ -403,7 +403,7 @@ void launch_image_loss_bwd2(
     S* __restrict__ hessian_diag,
     int B, int H, int W,
     int window_size,
-    S lambda_l1,
+    S lambda_l2,
     S lambda_ssim,
     S C1, S C2,
     cudaStream_t stream
@@ -417,7 +417,7 @@ void launch_image_loss_bwd2(
     
     // L2 contributes 2/N to Hessian
     compute_l2_hessian_kernel<S><<<blocks, threads, 0, stream>>>(
-        grad_output, hessian_diag, lambda_l1, total_pixels
+        grad_output, hessian_diag, lambda_l2, total_pixels
     );
     
     // Kernel: SSIM Hessian

@@ -163,7 +163,7 @@ void launch_image_loss_fwd(
     const S* __restrict__ prediction,
     const S* __restrict__ target,
     const S* __restrict__ gaussian_window,
-    S* __restrict__ l1_map,
+    S* __restrict__ l2_map,
     S* __restrict__ mu_r,
     S* __restrict__ mu_m,
     S* __restrict__ f1,
@@ -182,12 +182,12 @@ void launch_image_loss_fwd(
     int out_W = W;
     int total_outputs = B * out_H * out_W;
     
-    // Kernel 1: Compute L2 map
+    // Kernel 1: Compute L2 (squared error) map
     {
         int threads = GSPLAT2CT_N_THREADS;
         int blocks = (total_pixels + threads - 1) / threads;
         compute_l2_map_kernel<S><<<blocks, threads, 0, stream>>>(
-            prediction, target, l1_map, total_pixels
+            prediction, target, l2_map, total_pixels
         );
     }
     
