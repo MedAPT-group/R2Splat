@@ -233,7 +233,7 @@ std::tuple<
 rasterize_to_pixels_bwd2_tensor(
     const torch::Tensor& means2d,       // [C, N, 2]
     const torch::Tensor& conics,        // [C, N, 3]
-    const torch::Tensor& opacities,     // [C, N]
+    const torch::Tensor& opacities,     // [C, N] // 其实应该为[N]，之后可以改一下。
     const torch::Tensor& mus,           // [C, N]
     const torch::Tensor& tile_offsets,  // [C, n_tiles_dim0, n_tiles_dim1]
     const torch::Tensor& flatten_ids,   // [n_isects]

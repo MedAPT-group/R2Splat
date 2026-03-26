@@ -46,7 +46,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         self.initialized = False
 
     def initialize(self, params: Params, config: Optional[Config] = None) -> None:
-        for name in ['means', 'quats', 'scale_ori', 'opacity', 'opacity_vol']:
+        for name in ['means', 'quats', 'scale_ori', 'opacity']:
             if params.get(name) is None:
                 raise ValueError(f"Missing required parameter: {name}")
         self.initialized = True
@@ -56,8 +56,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         means = params.get('means').data
         quats = params.get('quats').data
         scale_ori = params.get('scale_ori').data
-        opacity = params.get('opacity').data
-        opacity_vol = params.get('opacity_vol').data
+        opacity = params.get('opacity').data       # (N,)
 
         viewmats = data.get('viewmats')
         Ks = data.get('Ks')
@@ -85,7 +84,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         scale_min = config.get('scale_min', 0.01)
         scale_max = config.get('scale_max', 2.0)
 
-        return (means, quats, scale_ori, opacity, opacity_vol,
+        return (means, quats, scale_ori, opacity,
                 viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
                 img_dim1, img_dim0, img_tile_size, eps_blur,
                 lambda_l1, lambda_ssim, window_size,
@@ -104,7 +103,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
             voxelize_to_voxels_fwd, l2_loss_fwd,
         )
 
-        (means, quats, scale_ori, opacity, opacity_vol,
+        (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
          img_dim1, img_dim0, img_tile_size, eps_blur,
          lambda_l1, lambda_ssim, window_size,
@@ -113,6 +112,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
          scale_min, scale_max) = self._extract(params, data, config)
 
         C = viewmats.shape[0]
+        opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         # Shared: ParameterTransform
         covars, max_scales = parameter_transform_fwd(
@@ -133,7 +133,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         tile_offsets_2d = isect_offset_encode(isect_ids_2d, C, n_tw, n_th)
 
         render_img = rasterize_to_pixels_fwd(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d,
             img_dim1, img_dim0, img_tile_size
         )
@@ -157,7 +157,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
             isect_ids_3d, n_tvz, n_tvy, n_tvx
         )
         render_vol = voxelize_to_voxels_fwd(
-            means3d_v, conics_3d, opacity_vol,
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
@@ -191,7 +191,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
             l2_loss_fwd, l2_loss_bwd,
         )
 
-        (means, quats, scale_ori, opacity, opacity_vol,
+        (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
          img_dim1, img_dim0, img_tile_size, eps_blur,
          lambda_l1, lambda_ssim, window_size,
@@ -202,6 +202,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         C = viewmats.shape[0]
         N = means.shape[0]
         grad_one = torch.ones(1, device=means.device, dtype=means.dtype)
+        opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         # FORWARD: Shared
         covars, max_scales = parameter_transform_fwd(
@@ -220,7 +221,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         )
         tile_offsets_2d = isect_offset_encode(isect_ids_2d, C, n_tw, n_th)
         render_img = rasterize_to_pixels_fwd(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d,
             img_dim1, img_dim0, img_tile_size
         )
@@ -247,7 +248,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
             isect_ids_3d, n_tvz, n_tvy, n_tvx
         )
         render_vol = voxelize_to_voxels_fwd(
-            means3d_v, conics_3d, opacity_vol,
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
@@ -261,7 +262,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
             grad_one, window_size, lambda_l1, lambda_ssim
         )
         v_means2d, v_conics_2d, v_opacity_rast, v_mus = rasterize_to_pixels_bwd(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d, v_render_img,
             img_dim1, img_dim0, img_tile_size
         )
@@ -276,8 +277,8 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         # BACKWARD: Voxelize path (L2 loss)
         grad_vol = grad_one * lambda_vol
         v_render_vol = l2_loss_bwd(render_vol, vol_target, grad_vol)
-        v_means3d_v, v_conics_3d_vol, v_opacity_vol_out = voxelize_to_voxels_bwd(
-            means3d_v, conics_3d, opacity_vol,
+        v_means3d_v, v_conics_3d_vol, v_opacity_vol = voxelize_to_voxels_bwd(
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d, v_render_vol,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
@@ -290,6 +291,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         # MERGE + ParameterTransform bwd
         v_covars_total = v_covars_rast + v_covars_vol
         v_means_total = v_means_rast + v_means_vol
+        v_opacity_total = v_opacity_rast.sum(dim=0) + v_opacity_vol
         v_quats, v_scale_ori = parameter_transform_bwd(
             quats, scale_ori, scale_min, scale_max, v_covars_total
         )
@@ -303,8 +305,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         )
         grad_result = GradResult(param_grads={
             'means': v_means_total, 'quats': v_quats,
-            'scale_ori': v_scale_ori, 'opacity': v_opacity_rast,
-            'opacity_vol': v_opacity_vol_out,
+            'scale_ori': v_scale_ori, 'opacity': v_opacity_total,
         })
         return forward_result, grad_result
 
@@ -322,7 +323,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
             l2_loss_fwd, l2_loss_bwd, l2_loss_bwd2,
         )
 
-        (means, quats, scale_ori, opacity, opacity_vol,
+        (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
          img_dim1, img_dim0, img_tile_size, eps_blur,
          lambda_l1, lambda_ssim, window_size,
@@ -335,6 +336,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         dtype = means.dtype
         device = means.device
         grad_one = torch.ones(1, device=device, dtype=dtype)
+        opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         # FORWARD: Shared
         covars, max_scales = parameter_transform_fwd(
@@ -353,7 +355,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         )
         tile_offsets_2d = isect_offset_encode(isect_ids_2d, C, n_tw, n_th)
         render_img = rasterize_to_pixels_fwd(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d,
             img_dim1, img_dim0, img_tile_size
         )
@@ -380,7 +382,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
             isect_ids_3d, n_tvz, n_tvy, n_tvx
         )
         render_vol = voxelize_to_voxels_fwd(
-            means3d_v, conics_3d, opacity_vol,
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
@@ -403,7 +405,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
          h_mu_mean_r, h_mu_conic_r, h_mean_conic_r,
          h_mu_opacity_r, h_conic_opacity_r, h_mean_opacity_r,
          h_mus_r, h_opacity_rast) = rasterize_to_pixels_bwd2(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d,
             v_render_img, h_render_img,
             img_dim1, img_dim0, img_tile_size
@@ -434,10 +436,10 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         v_render_vol = l2_loss_bwd(render_vol, vol_target, grad_vol)
         h_render_vol = l2_loss_bwd2(render_vol, grad_vol)
 
-        (v_means3d_v_vol, v_conics_3d_vol, v_opacity_vol_out,
-         h_means3d_v_vol, h_conics_3d_vol, h_opacity_vol_out,
+        (v_means3d_v_vol, v_conics_3d_vol, v_opacity_vol,
+         h_means3d_v_vol, h_conics_3d_vol, h_opacity_vol,
          h_op_mean_vol, h_op_conic_vol, h_mean_conic_vol) = voxelize_to_voxels_bwd2(
-            means3d_v, conics_3d, opacity_vol,
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d,
             v_render_vol, h_render_vol,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
@@ -456,12 +458,15 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         # ========== MERGE + ParameterTransform bwd2 ==========
         v_means_total = v_means_rast + v_means_vol
         v_covars_total = v_covars_rast + v_covars_vol
+        v_opacity_total = v_opacity_rast.sum(dim=0) + v_opacity_vol
+
         h_means_total = h_means_rast + h_means_vol
         h_covars_total = h_covars_rast + h_covars_vol
+        h_opacity_total = h_opacity_rast.sum(dim=0) + h_opacity_vol
         h_means_covars_total = h_means_covars_rast + h_means_covars_vol
 
-        h_covars_opacity_rast_summed = h_covars_opacity_rast.sum(dim=0)
-        h_covars_opacity_total = h_covars_opacity_rast_summed + h_covars_opacity_vol
+        h_means_opacity_total = h_means_opacity_rast.sum(dim=0) + h_means_opacity_vol
+        h_covars_opacity_total = h_covars_opacity_rast.sum(dim=0) + h_covars_opacity_vol
 
         h_mc_mat = h_means_covars_total.reshape(N, 3, 6)
         h_cm_mat = h_mc_mat.transpose(-1, -2)
@@ -485,21 +490,18 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         )
         grad_result = GradResult(param_grads={
             'means': v_means_total, 'quats': v_quats,
-            'scale_ori': v_scale_ori, 'opacity': v_opacity_rast,
-            'opacity_vol': v_opacity_vol_out,
+            'scale_ori': v_scale_ori, 'opacity': v_opacity_total,
         })
         hess_result = HessResult(
             param_hess={
                 'means': h_means_total,
                 'quats': h_quats,
                 'scale_ori': h_scale_ori,
-                'opacity': h_opacity_rast,
-                'opacity_vol': h_opacity_vol_out,
+                'opacity': h_opacity_total,
             },
             cross_hess={
                 'quats_scale_ori': h_quats_scale_ori,
-                'means_opacity_rast': h_means_opacity_rast,
-                'means_opacity_vol': h_means_opacity_vol,
+                'means_opacity': h_means_opacity_total,
                 'quats_means': h_quats_means,
                 'quats_opacity': h_quats_opacity,
                 'scale_ori_means': h_scale_ori_means,
@@ -523,14 +525,14 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         self.initialized = False
 
     def initialize(self, params: Params, config: Optional[Config] = None) -> None:
-        for name in ['means', 'quats', 'scale_ori', 'opacity', 'opacity_vol']:
+        for name in ['means', 'quats', 'scale_ori', 'opacity']:
             if params.get(name) is None:
                 raise ValueError(f"Missing required parameter: {name}")
         self.initialized = True
 
     def _forward_pipeline(
         self,
-        means, quats, scale_ori, opacity, opacity_vol,
+        means, quats, scale_ori, opacity,
         viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
         img_dim1, img_dim0, eps_blur, lambda_l1,
         vol_dim2, vol_dim1, vol_dim0, eps3d,
@@ -570,7 +572,8 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         conic_a = conics[..., 0].unsqueeze(-1).unsqueeze(-1)
         conic_b = conics[..., 1].unsqueeze(-1).unsqueeze(-1)
         conic_c = conics[..., 2].unsqueeze(-1).unsqueeze(-1)
-        opa = opacity.unsqueeze(-1).unsqueeze(-1)
+        # opacity (N,) -> (1, N, 1, 1) for broadcasting with (C, N, H, W)
+        opa = opacity.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
         mu = mus_2d.unsqueeze(-1).unsqueeze(-1)
 
         dx = px - mean_x
@@ -606,7 +609,7 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         c = conics_3d[:, 5].unsqueeze(0)
 
         sig3d = 0.5 * (a*d_x*d_x + b*d_y*d_y + c*d_z*d_z) + p*d_x*d_y + q*d_x*d_z + r*d_y*d_z
-        G = opacity_vol.unsqueeze(0) * torch.exp(-sig3d)
+        G = opacity.unsqueeze(0) * torch.exp(-sig3d)
         mask3d = (sig3d >= 0) & (G.abs() >= 1e-5)
         G_masked = torch.where(mask3d, G, torch.zeros_like(G))
         render_vol = G_masked.sum(dim=1).reshape(vol_dim0, vol_dim1, vol_dim2)
@@ -627,7 +630,7 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
 
     def forward_backward1(self, params, data, config=None):
         e = self._unpack(params, data, config, requires_grad=True)
-        means, quats, scale_ori, opacity, opacity_vol = e[:5]
+        means, quats, scale_ori, opacity = e[:4]
         loss, ri, rv = self._forward_pipeline(*e)
         loss.backward()
         fwd = ForwardResult(
@@ -637,36 +640,31 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         grad = GradResult(param_grads={
             'means': means.grad.detach(), 'quats': quats.grad.detach(),
             'scale_ori': scale_ori.grad.detach(), 'opacity': opacity.grad.detach(),
-            'opacity_vol': opacity_vol.grad.detach(),
         })
         return fwd, grad
 
     def forward_backward2(self, params, data, config=None):
         e = self._unpack(params, data, config, requires_grad=True)
-        means, quats, scale_ori, opacity, opacity_vol = e[:5]
+        means, quats, scale_ori, opacity = e[:4]
         N = means.shape[0]
-        C = opacity.shape[0]
         dtype = means.dtype
         device = means.device
 
         loss, ri, rv = self._forward_pipeline(*e)
 
-        all_params = [means, quats, scale_ori, opacity, opacity_vol]
-        v_means, v_quats, v_scale_ori, v_opacity, v_opacity_vol = torch.autograd.grad(
+        all_params = [means, quats, scale_ori, opacity]
+        v_means, v_quats, v_scale_ori, v_opacity = torch.autograd.grad(
             loss, all_params, create_graph=True, retain_graph=True,
         )
 
-        # Per-Gaussian Hessian blocks (same structure as GS3DProjectionOnlyAutograd)
         h_pp = torch.zeros(N, 3, 3, dtype=dtype, device=device)
         h_qq = torch.zeros(N, 4, 4, dtype=dtype, device=device)
         h_ss = torch.zeros(N, 3, 3, dtype=dtype, device=device)
-        h_oo_rast = torch.zeros(C, N, dtype=dtype, device=device)
-        h_oo_vol = torch.zeros(N, dtype=dtype, device=device)
+        h_oo = torch.zeros(N, dtype=dtype, device=device)
 
         h_pq = torch.zeros(N, 3, 4, dtype=dtype, device=device)
         h_ps = torch.zeros(N, 3, 3, dtype=dtype, device=device)
-        h_po_rast = torch.zeros(C, N, 3, dtype=dtype, device=device)
-        h_po_vol = torch.zeros(N, 3, dtype=dtype, device=device)
+        h_po = torch.zeros(N, 3, dtype=dtype, device=device)
         h_qs = torch.zeros(N, 4, 3, dtype=dtype, device=device)
         h_qo = torch.zeros(N, 4, dtype=dtype, device=device)
         h_so = torch.zeros(N, 3, dtype=dtype, device=device)
@@ -681,51 +679,39 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
                 g_q = grads[1] if grads[1] is not None else torch.zeros_like(quats)
                 g_s = grads[2] if grads[2] is not None else torch.zeros_like(scale_ori)
                 g_o = grads[3] if grads[3] is not None else torch.zeros_like(opacity)
-                g_ov = grads[4] if grads[4] is not None else torch.zeros_like(opacity_vol)
                 h_pp[g, i, :] = g_p[g, :]
                 h_pq[g, i, :] = g_q[g, :]
                 h_ps[g, i, :] = g_s[g, :]
-                h_po_rast[:, g, i] = g_o[:, g]
-                h_po_vol[g, i] = g_ov[g]
+                h_po[g, i] = g_o[g]
 
             for i in range(4):
                 grads = torch.autograd.grad(
-                    v_quats[g, i], [quats, scale_ori, opacity, opacity_vol],
+                    v_quats[g, i], [quats, scale_ori, opacity],
                     retain_graph=True, allow_unused=True,
                 )
                 g_q = grads[0] if grads[0] is not None else torch.zeros_like(quats)
                 g_s = grads[1] if grads[1] is not None else torch.zeros_like(scale_ori)
                 g_o = grads[2] if grads[2] is not None else torch.zeros_like(opacity)
-                g_ov = grads[3] if grads[3] is not None else torch.zeros_like(opacity_vol)
                 h_qq[g, i, :] = g_q[g, :]
                 h_qs[g, i, :] = g_s[g, :]
-                h_qo[g, i] = g_o[:, g].sum() + g_ov[g]
+                h_qo[g, i] = g_o[g]
 
             for i in range(3):
                 grads = torch.autograd.grad(
-                    v_scale_ori[g, i], [scale_ori, opacity, opacity_vol],
+                    v_scale_ori[g, i], [scale_ori, opacity],
                     retain_graph=True, allow_unused=True,
                 )
                 g_s = grads[0] if grads[0] is not None else torch.zeros_like(scale_ori)
                 g_o = grads[1] if grads[1] is not None else torch.zeros_like(opacity)
-                g_ov = grads[2] if grads[2] is not None else torch.zeros_like(opacity_vol)
                 h_ss[g, i, :] = g_s[g, :]
-                h_so[g, i] = g_o[:, g].sum() + g_ov[g]
-
-            for c_idx in range(C):
-                grads = torch.autograd.grad(
-                    v_opacity[c_idx, g], [opacity],
-                    retain_graph=True, allow_unused=True,
-                )
-                g_o = grads[0] if grads[0] is not None else torch.zeros_like(opacity)
-                h_oo_rast[c_idx, g] = g_o[c_idx, g]
+                h_so[g, i] = g_o[g]
 
             grads = torch.autograd.grad(
-                v_opacity_vol[g], [opacity_vol],
+                v_opacity[g], [opacity],
                 retain_graph=True, allow_unused=True,
             )
-            g_ov = grads[0] if grads[0] is not None else torch.zeros_like(opacity_vol)
-            h_oo_vol[g] = g_ov[g]
+            g_o = grads[0] if grads[0] is not None else torch.zeros_like(opacity)
+            h_oo[g] = g_o[g]
 
         # Pack into standard format
         h_means_out = torch.zeros(N, 6, dtype=dtype, device=device)
@@ -754,20 +740,17 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         grad_r = GradResult(param_grads={
             'means': v_means.detach(), 'quats': v_quats.detach(),
             'scale_ori': v_scale_ori.detach(), 'opacity': v_opacity.detach(),
-            'opacity_vol': v_opacity_vol.detach(),
         })
         hess_r = HessResult(
             param_hess={
                 'means': h_means_out.detach(),
                 'quats': h_quats_out.detach(),
                 'scale_ori': h_scale_ori_out.detach(),
-                'opacity': h_oo_rast.detach(),
-                'opacity_vol': h_oo_vol.detach(),
+                'opacity': h_oo.detach(),
             },
             cross_hess={
                 'quats_scale_ori': h_quats_scale_ori_out.detach(),
-                'means_opacity_rast': h_po_rast.detach(),
-                'means_opacity_vol': h_po_vol.detach(),
+                'means_opacity': h_po.detach(),
                 'quats_means': h_quats_means_out.detach(),
                 'quats_opacity': h_qo.detach(),
                 'scale_ori_means': h_scale_ori_means_out.detach(),
@@ -781,14 +764,12 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         quats = params.get('quats').data
         scale_ori = params.get('scale_ori').data
         opacity = params.get('opacity').data
-        opacity_vol = params.get('opacity_vol').data
 
         if requires_grad:
             means = means.detach().clone().requires_grad_(True)
             quats = quats.detach().clone().requires_grad_(True)
             scale_ori = scale_ori.detach().clone().requires_grad_(True)
             opacity = opacity.detach().clone().requires_grad_(True)
-            opacity_vol = opacity_vol.detach().clone().requires_grad_(True)
 
         viewmats = data.get('viewmats')
         Ks = data.get('Ks')
@@ -811,7 +792,7 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         scale_min = config.get('scale_min', 0.01)
         scale_max = config.get('scale_max', 2.0)
 
-        return (means, quats, scale_ori, opacity, opacity_vol,
+        return (means, quats, scale_ori, opacity,
                 viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
                 img_dim1, img_dim0, eps_blur, lambda_l1,
                 vol_dim2, vol_dim1, vol_dim0, eps3d,

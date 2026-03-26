@@ -22,8 +22,7 @@ Expected params:
     - means:     (N, 3)   world-space Gaussian centres (shared across cameras)
     - quats:     (N, 4)   unit quaternions (shared)
     - scale_ori: (N, 3)   raw scale parameters (shared)
-    - opacity:   (C, N)   per-Gaussian per-camera opacity for rasterize path
-    - opacity_vol: (N,)   per-Gaussian opacity for voxelize path
+    - opacity:   (N,)     per-Gaussian opacity (shared across cameras and paths)
 
 Expected data:
     - viewmats:  (C, 4, 4)  camera extrinsics
@@ -74,7 +73,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         self.initialized = False
 
     def initialize(self, params: Params, config: Optional[Config] = None) -> None:
-        for name in ['means', 'quats', 'scale_ori', 'opacity', 'opacity_vol']:
+        for name in ['means', 'quats', 'scale_ori', 'opacity']:
             if params.get(name) is None:
                 raise ValueError(f"Missing required parameter: {name}")
         means = params.get('means').data
@@ -92,8 +91,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         means = params.get('means').data
         quats = params.get('quats').data
         scale_ori = params.get('scale_ori').data
-        opacity = params.get('opacity').data       # (C, N) for rasterize
-        opacity_vol = params.get('opacity_vol').data  # (N,) for voxelize
+        opacity = params.get('opacity').data       # (N,)
 
         viewmats = data.get('viewmats')
         Ks = data.get('Ks')
@@ -121,7 +119,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         scale_min = config.get('scale_min', 0.01)
         scale_max = config.get('scale_max', 2.0)
 
-        return (means, quats, scale_ori, opacity, opacity_vol,
+        return (means, quats, scale_ori, opacity,
                 viewmats, Ks, targets, vol_ranges, vol_centers,
                 img_dim1, img_dim0, img_tile_size, eps_blur,
                 lambda_l1, lambda_ssim, window_size,
@@ -149,7 +147,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             voxelize_to_voxels_fwd, volume_loss_fwd,
         )
 
-        (means, quats, scale_ori, opacity, opacity_vol,
+        (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers,
          img_dim1, img_dim0, img_tile_size, eps_blur,
          lambda_l1, lambda_ssim, window_size,
@@ -159,6 +157,9 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
 
         C = viewmats.shape[0]
         N = means.shape[0]
+
+        # Broadcast opacity (N,) -> (C, N) for rasterize path
+        opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         # === Shared: ParameterTransform ===
         covars, max_scales = parameter_transform_fwd(
@@ -181,7 +182,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         )
 
         render_img = rasterize_to_pixels_fwd(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d,
             img_dim1, img_dim0, img_tile_size
         )
@@ -211,7 +212,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         )
 
         render_vol = voxelize_to_voxels_fwd(
-            means3d_v, conics_3d, opacity_vol,
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
@@ -257,7 +258,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             volume_loss_fwd, volume_loss_bwd,
         )
 
-        (means, quats, scale_ori, opacity, opacity_vol,
+        (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers,
          img_dim1, img_dim0, img_tile_size, eps_blur,
          lambda_l1, lambda_ssim, window_size,
@@ -267,6 +268,9 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
 
         C = viewmats.shape[0]
         N = means.shape[0]
+
+        # Broadcast opacity (N,) -> (C, N) for rasterize path
+        opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         # ============================================================
         # FORWARD: Shared ParameterTransform
@@ -293,7 +297,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         )
 
         render_img = rasterize_to_pixels_fwd(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d,
             img_dim1, img_dim0, img_tile_size
         )
@@ -327,7 +331,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         )
 
         render_vol = voxelize_to_voxels_fwd(
-            means3d_v, conics_3d, opacity_vol,
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
@@ -344,7 +348,6 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         # ============================================================
         grad_one = torch.ones(1, device=means.device, dtype=means.dtype)
 
-        # ImageLoss bwd
         v_render_img = image_loss_bwd(
             render_img, targets,
             mu_r, mu_m, f1, f2, f3, f4,
@@ -352,19 +355,16 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             lambda_l1, lambda_ssim
         )
 
-        # RasterizeToPixels bwd
         v_means2d, v_conics_2d, v_opacity_rast, v_mus = rasterize_to_pixels_bwd(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d, v_render_img,
             img_dim1, img_dim0, img_tile_size
         )
 
-        # ConicsMu bwd
         v_cov2d_3x3 = conics_mu_bwd(
             cov2d_3x3, eps_blur, conics_2d, mus, v_conics_2d, v_mus
         )
 
-        # WorldToImageProjection bwd
         v_means_rast, v_covars_rast = world_to_image_projection_bwd(
             means, covars, viewmats, Ks, img_dim1, img_dim0,
             v_means2d, v_cov2d_3x3,
@@ -378,8 +378,8 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         )
         v_render_vol = v_render_vol_4d.squeeze(0)
 
-        v_means3d_v, v_conics_3d_vol, v_opacity_vol_out = voxelize_to_voxels_bwd(
-            means3d_v, conics_3d, opacity_vol,
+        v_means3d_v, v_conics_3d_vol, v_opacity_vol = voxelize_to_voxels_bwd(
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d, v_render_vol,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
@@ -395,6 +395,9 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         # ============================================================
         v_covars_total = v_covars_rast + v_covars_vol
         v_means_total = v_means_rast + v_means_vol
+
+        # Opacity: sum rasterize (C,N) over cameras, add voxelize (N,)
+        v_opacity_total = v_opacity_rast.sum(dim=0) + v_opacity_vol
 
         v_quats, v_scale_ori = parameter_transform_bwd(
             quats, scale_ori, scale_min, scale_max, v_covars_total
@@ -417,8 +420,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
                 'means': v_means_total,
                 'quats': v_quats,
                 'scale_ori': v_scale_ori,
-                'opacity': v_opacity_rast,
-                'opacity_vol': v_opacity_vol_out,
+                'opacity': v_opacity_total,
             }
         )
         return forward_result, grad_result
@@ -452,7 +454,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             volume_loss_fwd, volume_loss_bwd, volume_loss_bwd2,
         )
 
-        (means, quats, scale_ori, opacity, opacity_vol,
+        (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers,
          img_dim1, img_dim0, img_tile_size, eps_blur,
          lambda_l1, lambda_ssim, window_size,
@@ -465,6 +467,9 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         dtype = means.dtype
         device = means.device
         grad_one = torch.ones(1, device=device, dtype=dtype)
+
+        # Broadcast opacity (N,) -> (C, N) for rasterize path
+        opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         # ============================================================
         # FORWARD: Shared ParameterTransform
@@ -491,7 +496,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         )
 
         render_img = rasterize_to_pixels_fwd(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d,
             img_dim1, img_dim0, img_tile_size
         )
@@ -509,7 +514,6 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         # RASTERIZE PATH: backward2
         # ==============================================================
 
-        # ImageLoss bwd + bwd2
         v_render_img = image_loss_bwd(
             render_img, targets,
             mu_r, mu_m, f1, f2, f3, f4,
@@ -521,19 +525,17 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             grad_one, window_size, lambda_l1, lambda_ssim
         )
 
-        # RasterizeToPixels bwd2
         (v_means2d_r, v_conics_2d_r, v_opacity_rast, v_mus_r,
          h_means2d_r, h_conics_2d_r,
          h_mu_mean_r, h_mu_conic_r, h_mean_conic_r,
          h_mu_opacity_r, h_conic_opacity_r, h_mean_opacity_r,
          h_mus_r, h_opacity_rast) = rasterize_to_pixels_bwd2(
-            means2d, conics_2d, opacity, mus,
+            means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d,
             v_render_img, h_render_img,
             img_dim1, img_dim0, img_tile_size
         )
 
-        # ConicsMu bwd2
         h_means2d_conics_r = h_mean_conic_r.reshape(C, -1, 6)
         v_cov2d_3x3_r, h_cov_cov_r, h_cov_means2d_r, h_cov_opacity_r = conics_mu_bwd2(
             cov2d_3x3, eps_blur, conics_2d, mus,
@@ -542,8 +544,6 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             h_means2d_conics_r, h_conic_opacity_r, h_mu_mean_r, h_mu_opacity_r,
         )
 
-        # WorldToImageProjection bwd2
-        # h_cov_means2d_r is (C,N,12) in 6x2 row-major; need 2x6 for h_means2d_cov2d_3x3
         h_cov_means2d_mat = h_cov_means2d_r.reshape(C, N, 6, 2)
         h_means2d_cov_r = h_cov_means2d_mat.transpose(-1, -2).reshape(C, N, 12)
 
@@ -576,7 +576,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         )
 
         render_vol = voxelize_to_voxels_fwd(
-            means3d_v, conics_3d, opacity_vol,
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
@@ -592,7 +592,6 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         # VOXELIZE PATH: backward2
         # ==============================================================
 
-        # VolumeLoss bwd + bwd2
         v_render_vol_4d = volume_loss_bwd(
             render_vol_4d, grad_one, vol_loss_eps, lambda_tv
         )
@@ -603,17 +602,15 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         )
         h_render_vol = h_render_vol_4d.squeeze(0)
 
-        # VoxelizeToVoxels bwd2
-        (v_means3d_v_vol, v_conics_3d_vol, v_opacity_vol_out,
-         h_means3d_v_vol, h_conics_3d_vol, h_opacity_vol_out,
+        (v_means3d_v_vol, v_conics_3d_vol, v_opacity_vol,
+         h_means3d_v_vol, h_conics_3d_vol, h_opacity_vol,
          h_op_mean_vol, h_op_conic_vol, h_mean_conic_vol) = voxelize_to_voxels_bwd2(
-            means3d_v, conics_3d, opacity_vol,
+            means3d_v, conics_3d, opacity,
             tile_offsets_3d, flatten_ids_3d,
             v_render_vol, h_render_vol,
             vol_dim2, vol_dim1, vol_dim0, vol_tile_size
         )
 
-        # WorldToVolumeMapping bwd2
         (v_means_vol, v_covars_vol,
          h_means_vol, h_covars_vol, h_means_covars_vol,
          h_means_opacity_vol, h_covars_opacity_vol) = world_to_volume_mapping_bwd2(
@@ -632,24 +629,27 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         v_means_total = v_means_rast + v_means_vol
         v_covars_total = v_covars_rast + v_covars_vol
 
+        # Opacity gradient: sum rasterize (C,N) over cameras, add voxelize (N,)
+        v_opacity_total = v_opacity_rast.sum(dim=0) + v_opacity_vol
+
         # Self-Hessians
         h_means_total = h_means_rast + h_means_vol                  # (N, 6)
         h_covars_total = h_covars_rast + h_covars_vol                # (N, 21)
 
+        # Opacity self-Hessian: sum rasterize (C,N) over cameras, add voxelize (N,)
+        h_opacity_total = h_opacity_rast.sum(dim=0) + h_opacity_vol  # (N,)
+
         # Cross-Hessian means-covars
         h_means_covars_total = h_means_covars_rast + h_means_covars_vol  # (N, 18)
 
-        # Cross-Hessians with opacity:
-        # Rasterize: opacity is (C, N), hess are (C, N, ...) — sum over C for ParameterTransform
-        # Voxelize: opacity_vol is (N,), hess are (N, ...)
-        h_covars_opacity_rast_summed = h_covars_opacity_rast.sum(dim=0)  # (N, 6)
-        h_covars_opacity_total = h_covars_opacity_rast_summed + h_covars_opacity_vol  # (N, 6)
+        # Cross-Hessians with opacity: sum rasterize (C,N,...) over cameras, add voxelize (N,...)
+        h_means_opacity_total = h_means_opacity_rast.sum(dim=0) + h_means_opacity_vol  # (N, 3)
+        h_covars_opacity_total = h_covars_opacity_rast.sum(dim=0) + h_covars_opacity_vol  # (N, 6)
 
         # ==============================================================
         # ParameterTransform bwd2 (single pass)
         # ==============================================================
 
-        # Transpose h_means_covars: 3x6 row-major -> 6x3 row-major
         h_mc_mat = h_means_covars_total.reshape(N, 3, 6)
         h_cm_mat = h_mc_mat.transpose(-1, -2)
         h_covars_means_for_pt = h_cm_mat.reshape(N, 18)
@@ -685,8 +685,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
                 'means': v_means_total,
                 'quats': v_quats,
                 'scale_ori': v_scale_ori,
-                'opacity': v_opacity_rast,
-                'opacity_vol': v_opacity_vol_out,
+                'opacity': v_opacity_total,
             }
         )
 
@@ -695,13 +694,11 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
                 'means': h_means_total,                     # (N, 6)
                 'quats': h_quats,                           # (N, 10)
                 'scale_ori': h_scale_ori,                   # (N, 3)
-                'opacity': h_opacity_rast,                  # (C, N)
-                'opacity_vol': h_opacity_vol_out,           # (N,)
+                'opacity': h_opacity_total,                 # (N,)
             },
             cross_hess={
                 'quats_scale_ori': h_quats_scale_ori,       # (N, 12)
-                'means_opacity_rast': h_means_opacity_rast, # (C, N, 3)
-                'means_opacity_vol': h_means_opacity_vol,   # (N, 3)
+                'means_opacity': h_means_opacity_total,     # (N, 3)
                 'quats_means': h_quats_means,               # (N, 12)
                 'quats_opacity': h_quats_opacity,           # (N, 4)
                 'scale_ori_means': h_scale_ori_means,       # (N, 9)

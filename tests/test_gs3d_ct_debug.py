@@ -34,9 +34,9 @@ class _ParamWrapper:
 
 
 def generate_test_data(
-    N=3, C=2,
-    img_dim0=12, img_dim1=16,
-    vol_dim0=8, vol_dim1=8, vol_dim2=8,
+    N=47, C=3,
+    img_dim0=31, img_dim1=43,
+    vol_dim0=13, vol_dim1=12, vol_dim2=11,
     device='cuda', dtype=torch.float32,
     seed=42,
 ):
@@ -52,8 +52,7 @@ def generate_test_data(
 
     scale_ori = torch.randn(N, 3, device=device, dtype=dtype) * 0.3
 
-    opacity = torch.rand(C, N, device=device, dtype=dtype) * 0.1 - 0.05
-    opacity_vol = torch.rand(N, device=device, dtype=dtype) * 0.1 - 0.05
+    opacity = torch.rand(N, device=device, dtype=dtype) * 0.1 - 0.05
 
     # Camera parameters: simple identity-like views
     viewmats = torch.zeros(C, 4, 4, device=device, dtype=dtype)
@@ -75,12 +74,12 @@ def generate_test_data(
     vol_centers = torch.tensor([0.0, 0.0, 0.0], device=device, dtype=dtype)
     vol_target = torch.zeros(vol_dim0, vol_dim1, vol_dim2, device=device, dtype=dtype)
 
-    return (means, quats, scale_ori, opacity, opacity_vol,
+    return (means, quats, scale_ori, opacity,
             viewmats, Ks, targets, vol_ranges, vol_centers, vol_target)
 
 
 def make_params_data_config(
-    means, quats, scale_ori, opacity, opacity_vol,
+    means, quats, scale_ori, opacity,
     viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
     img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2,
 ):
@@ -89,7 +88,6 @@ def make_params_data_config(
     params.add_param('quats', _ParamWrapper(quats))
     params.add_param('scale_ori', _ParamWrapper(scale_ori))
     params.add_param('opacity', _ParamWrapper(opacity))
-    params.add_param('opacity_vol', _ParamWrapper(opacity_vol))
 
     data_obj = Data()
     data_obj.set('viewmats', viewmats)
@@ -102,20 +100,20 @@ def make_params_data_config(
     config = Config()
     config.set('img_dim1', img_dim1)
     config.set('img_dim0', img_dim0)
-    config.set('img_tile_size', 16)
-    config.set('eps_blur', 0.3)
+    config.set('img_tile_size', 7)
+    config.set('eps_blur', 0.0001)
     config.set('lambda_l1', 1.0)
     config.set('lambda_ssim', 0.0)
     config.set('window_size', 11)
     config.set('vol_dim2', vol_dim2)
     config.set('vol_dim1', vol_dim1)
     config.set('vol_dim0', vol_dim0)
-    config.set('vol_tile_size', 4)
+    config.set('vol_tile_size', 8)
     config.set('eps3d', 1e-4)
     config.set('radius_clip', 3.0)
     config.set('lambda_vol', 1.0)
-    config.set('scale_min', 0.01)
-    config.set('scale_max', 2.0)
+    config.set('scale_min', 0.001)
+    config.set('scale_max', 0.5)
 
     return params, data_obj, config
 
@@ -124,8 +122,8 @@ def make_params_data_config(
 # Test Functions
 # ============================================================================
 
-def test_forward(N=3, C=2, img_dim0=12, img_dim1=16,
-                 vol_dim0=8, vol_dim1=8, vol_dim2=8):
+def test_forward(N=47, C=3, img_dim0=31, img_dim1=43,
+                 vol_dim0=13, vol_dim1=12, vol_dim2=11):
     print("\n" + "=" * 70)
     print("TEST 1: Forward Pass Consistency (CUDA vs Autograd)")
     print("=" * 70)
@@ -156,8 +154,8 @@ def test_forward(N=3, C=2, img_dim0=12, img_dim1=16,
     return passed
 
 
-def test_backward1(N=3, C=2, img_dim0=12, img_dim1=16,
-                   vol_dim0=8, vol_dim1=8, vol_dim2=8, rtol=0.1):
+def test_backward1(N=47, C=3, img_dim0=31, img_dim1=43,
+                   vol_dim0=13, vol_dim1=12, vol_dim2=11, rtol=0.1):
     print("\n" + "=" * 70)
     print("TEST 2: First-Order Backward Consistency (CUDA vs Autograd)")
     print("=" * 70)
@@ -190,15 +188,15 @@ def test_backward1(N=3, C=2, img_dim0=12, img_dim1=16,
         return ok
 
     ok = True
-    for key in ['means', 'quats', 'scale_ori', 'opacity', 'opacity_vol']:
+    for key in ['means', 'quats', 'scale_ori', 'opacity']:
         ok &= compare(f"v_{key}", cuda_grad.param_grads.get(key), ag_grad.param_grads.get(key))
 
     print(f"\n{'✓' if ok else '✗'} TEST 2 {'PASSED' if ok else 'FAILED'}")
     return ok
 
 
-def test_backward2(N=3, C=1, img_dim0=8, img_dim1=8,
-                   vol_dim0=6, vol_dim1=6, vol_dim2=6, rtol=0.15):
+def test_backward2(N=47, C=3, img_dim0=31, img_dim1=43,
+                   vol_dim0=13, vol_dim1=12, vol_dim2=11, rtol=0.15):
     print("\n" + "=" * 70)
     print("TEST 3: Second-Order Backward Consistency (CUDA vs Autograd)")
     print("=" * 70)
@@ -245,17 +243,17 @@ def test_backward2(N=3, C=1, img_dim0=8, img_dim1=8,
     ok = True
 
     print("\n--- First-Order Gradients ---")
-    for key in ['means', 'quats', 'scale_ori', 'opacity', 'opacity_vol']:
+    for key in ['means', 'quats', 'scale_ori', 'opacity']:
         ok &= compare(f"v_{key}", ag_grad.param_grads.get(key), cuda_grad.param_grads.get(key))
 
     print("\n--- Self Hessians ---")
-    for key in ['means', 'quats', 'scale_ori', 'opacity', 'opacity_vol']:
+    for key in ['means', 'quats', 'scale_ori', 'opacity']:
         ok &= compare(f"h_{key}", ag_hess.param_hess.get(key), cuda_hess.param_hess.get(key))
 
     print("\n--- Cross-Term Hessians ---")
     for key in ['quats_scale_ori', 'quats_means', 'quats_opacity',
                 'scale_ori_means', 'scale_ori_opacity',
-                'means_opacity_rast', 'means_opacity_vol']:
+                'means_opacity']:
         ag_val = ag_hess.cross_hess.get(key)
         cuda_val = cuda_hess.cross_hess.get(key)
         if ag_val is not None and cuda_val is not None:
