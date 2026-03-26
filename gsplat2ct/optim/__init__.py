@@ -1,28 +1,40 @@
 """
 Optimizer package for gsplat2ct.
 
-This package provides second-order optimization methods based on damped Newton's method.
+New optimizer hierarchy (for GS3DCT):
+    base.OptimizerBase
+    ├── base.FirstOrderOptimizerBase  → gs3d_ct.GS3DCTAdamOptimizer
+    └── base.NewtonOptimizerBase      → gs3d_ct.GS3DCTNewtonOptimizer
 
-Submodules:
-- base: Abstract base classes (OptimizerConfig, SecondOrderOptimizerBase)
-- mlp: MLP-specific optimizer (MLPOptimizerConfig, MLPSecondOrderOptimizer)
-- loss: ImageLoss-specific optimizer (ImageLossOptimizerConfig, ImageLossSecondOrderOptimizer)
-
-Usage:
-    # Import from specific submodule
-    from gsplat2ct.optim.base import OptimizerConfig
-    from gsplat2ct.optim.mlp import MLPSecondOrderOptimizer
-    from gsplat2ct.optim.loss import ImageLossSecondOrderOptimizer
-    
-    # Or import directly from package (convenience)
-    from gsplat2ct.optim import MLPSecondOrderOptimizer, MLPOptimizerConfig
-    from gsplat2ct.optim import ImageLossSecondOrderOptimizer, ImageLossOptimizerConfig
+Legacy optimizers (gs2d, gs3d_smoothing, mlp, loss) still use the old
+SecondOrderOptimizerBase interface.
 
 Author: Dy164
-Date: 2025-12-18
+Date: 2026-03-25
 """
 
-from .base import OptimizerConfig, SecondOrderOptimizerBase
+# --- New base classes and enums ---
+from .base import (
+    HessianMode,
+    SignalStrategy,
+    OptimizerConfig,
+    FirstOrderConfig,
+    SecondOrderConfig,
+    OptimizerBase,
+    FirstOrderOptimizerBase,
+    NewtonOptimizerBase,
+    SecondOrderOptimizerBase,  # legacy alias
+)
+
+# --- GS3DCT-specific optimizers ---
+from .gs3d_ct import (
+    GS3DCTAdamOptimizer,
+    GS3DCTNewtonOptimizer,
+    create_gs3d_ct_adam,
+    create_gs3d_ct_newton,
+)
+
+# --- Legacy optimizers ---
 from .mlp import MLPOptimizerConfig, MLPSecondOrderOptimizer
 from .loss import ImageLossOptimizerConfig, ImageLossSecondOrderOptimizer
 from .gs2d import GS2DOptimizerConfig, GS2DSecondOrderOptimizer
@@ -34,23 +46,34 @@ from .gs3d_smoothing import (
 
 
 __all__ = [
-    # Base classes
+    # Enums
+    "HessianMode",
+    "SignalStrategy",
+
+    # Configs
     "OptimizerConfig",
+    "FirstOrderConfig",
+    "SecondOrderConfig",
+
+    # New base classes
+    "OptimizerBase",
+    "FirstOrderOptimizerBase",
+    "NewtonOptimizerBase",
+
+    # GS3DCT optimizers
+    "GS3DCTAdamOptimizer",
+    "GS3DCTNewtonOptimizer",
+    "create_gs3d_ct_adam",
+    "create_gs3d_ct_newton",
+
+    # Legacy
     "SecondOrderOptimizerBase",
-    
-    # MLP-specific
     "MLPOptimizerConfig",
     "MLPSecondOrderOptimizer",
-    
-    # ImageLoss-specific
     "ImageLossOptimizerConfig",
     "ImageLossSecondOrderOptimizer",
-    
-    # 2DGS-specific
     "GS2DOptimizerConfig",
     "GS2DSecondOrderOptimizer",
-    
-    # 3DGS Smoothing-specific
     "GS3DSmoothingOptimizerConfig",
     "GS3DSmoothingSecondOrderOptimizer",
     "create_gs3d_smoothing_optimizer",
