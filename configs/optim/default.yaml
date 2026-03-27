@@ -1,0 +1,26 @@
+# Optimizer configuration.
+#
+# When use_second_order is false, only lr_* fields are used (Adam).
+# When true, damping_* fields are also used (Newton family).
+
+use_second_order: false
+
+# Per-parameter learning rates
+lr_means: 0.002
+lr_quats: 0.0005
+lr_scale_ori: 0.01
+lr_opacity: 0.02
+
+# Adam hyper-parameters (first-order only)
+beta1: 0.9
+beta2: 0.999
+eps: 1.0e-8
+
+# Newton hyper-parameters (second-order only)
+hess_mode: "DIAGONAL"
+grad_strategy: "RAW"
+hess_strategy: "RAW"
+damping_means: 1.0e-3
+damping_quats: 1.0e-3
+damping_scale_ori: 1.0e-3
+damping_opacity: 1.0e-3

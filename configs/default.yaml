@@ -1,0 +1,9 @@
+# Default training profile assembled from config groups.
+
+defaults:
+  - base
+  - model: default
+  - trainer: default
+  - optim: default
+  - exp: 25_views
+  - _self_

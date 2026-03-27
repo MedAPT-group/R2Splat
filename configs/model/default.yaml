@@ -1,0 +1,12 @@
+# Gaussian model initialization parameters.
+#
+# scale_min / scale_max are shared between parameter initialization
+# (GaussianParams) and the training operator (ParameterTransform kernel).
+# Always keep them in sync.
+
+global_scale: 1.0
+init_opa_scale: 1.0
+init_scale_multiplier: 0.5
+
+scale_min: 0.001
+scale_max: 1.0

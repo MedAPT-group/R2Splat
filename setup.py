@@ -109,6 +109,10 @@ setup(
         "torch>=2.0.0",
         "numpy",
         "rich",
+        "hydra-core>=1.3",
+        "omegaconf>=2.3",
+        "matplotlib",
+        "tqdm",
     ],
     extras_require={
         "dev": [

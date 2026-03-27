@@ -11,6 +11,8 @@ __pycache__/
 # 项目打包信息（你目录里已有的 gsplat2ct.egg-info）
 *.egg-info/
 gsplat2ct.egg-info/
+# 输出目录
+output/
 
 # ============== CUDA / C++ 编译文件 ==============
 # CUDA 编译产物

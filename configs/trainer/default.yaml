@@ -1,0 +1,33 @@
+# Training loop configuration.
+
+device: "cuda:0"
+
+max_steps: 30000
+batch_size: 1
+
+save_steps: [4999, 9999, 19999, 29999]
+
+# Image loss weights
+lambda_l1: 1.0
+lambda_ssim: 0.25
+window_size: 11
+
+# TV regularization
+lambda_tv: 0.05
+tv_vol_size: 32
+
+# Operator parameters
+eps_blur: 1e-4
+img_tile_size: 16
+vol_tile_size: 8
+eps3d: 1.0e-4
+radius_clip: 3.0
+vol_loss_eps: 1e-4
+
+# Evaluation
+eval_interval: 1000
+
+# Dataloader
+num_workers: 8
+pin_memory: true
+persistent_workers: true

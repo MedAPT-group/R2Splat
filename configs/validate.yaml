@@ -1,0 +1,21 @@
+# Standalone validation configuration.
+
+defaults:
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+data_dir: ""
+checkpoint_path: ""
+result_dir: null
+device: "cuda:0"
+
+eval_save_images_n: 100
+ssim_window: 11
+
+# Must match training model config when loading a checkpoint.
+scale_min: 0.001
+scale_max: 1.0
