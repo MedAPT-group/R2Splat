@@ -222,10 +222,10 @@ class RasterizeToPixelsCUDA(SecondForwardBackwardBase):
             v_render_output = torch.ones_like(render_output)
         
         # Backward pass
-        v_means2d, v_conics, v_opacities, v_mus = rasterize_to_pixels_bwd(
+        _v_means2d_abs, v_means2d, v_conics, v_opacities, v_mus = rasterize_to_pixels_bwd(
             means2d, conics, opacities, mus,
             tile_offsets, flatten_ids, v_render_output,
-            dim1, dim0, tile_size
+            dim1, dim0, tile_size, False
         )
         
         forward_result = ForwardResult(

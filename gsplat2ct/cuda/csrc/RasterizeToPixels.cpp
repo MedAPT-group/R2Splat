@@ -118,7 +118,7 @@ torch::Tensor rasterize_to_pixels_fwd_tensor(
 // Backward Pass Tensor Interface
 // ============================================================================
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 rasterize_to_pixels_bwd_tensor(
     const torch::Tensor& means2d,       // [C, N, 2]
     const torch::Tensor& conics,        // [C, N, 3]
@@ -129,7 +129,8 @@ rasterize_to_pixels_bwd_tensor(
     const torch::Tensor& v_render_output,  // [C, dim0, dim1]
     const uint32_t dim1,
     const uint32_t dim0,
-    const uint32_t tile_size
+    const uint32_t tile_size,
+    const bool absgrad
 ) {
     GSPLAT2CT_DEVICE_GUARD(means2d);
     GSPLAT2CT_CHECK_INPUT(means2d);
@@ -177,13 +178,14 @@ rasterize_to_pixels_bwd_tensor(
 
     // Allocate output gradient tensors (initialize to zero for atomic add)
     torch::Tensor v_means2d = torch::zeros_like(means2d);
+    torch::Tensor v_means2d_abs = absgrad ? torch::zeros_like(means2d) : torch::Tensor();
     torch::Tensor v_conics = torch::zeros_like(conics);
     torch::Tensor v_opacities = torch::zeros_like(opacities);
     torch::Tensor v_mus = torch::zeros_like(mus);
 
     // Handle empty case
     if (C == 0 || N == 0 || n_isects == 0) {
-        return std::make_tuple(v_means2d, v_conics, v_opacities, v_mus);
+        return std::make_tuple(v_means2d_abs, v_means2d, v_conics, v_opacities, v_mus);
     }
 
     // Dispatch to CUDA kernel
@@ -199,6 +201,7 @@ rasterize_to_pixels_bwd_tensor(
                 tile_offsets.data_ptr<int32_t>(),
                 flatten_ids.data_ptr<int32_t>(),
                 v_render_output.data_ptr<scalar_t>(),
+                absgrad ? v_means2d_abs.data_ptr<scalar_t>() : nullptr,
                 v_means2d.data_ptr<scalar_t>(),
                 v_conics.data_ptr<scalar_t>(),
                 v_opacities.data_ptr<scalar_t>(),
@@ -216,7 +219,7 @@ rasterize_to_pixels_bwd_tensor(
         }
     );
 
-    return std::make_tuple(v_means2d, v_conics, v_opacities, v_mus);
+    return std::make_tuple(v_means2d_abs, v_means2d, v_conics, v_opacities, v_mus);
 }
 
 // ============================================================================

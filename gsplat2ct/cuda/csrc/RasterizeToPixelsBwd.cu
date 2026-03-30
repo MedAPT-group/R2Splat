@@ -92,6 +92,7 @@ __global__ void rasterize_to_pixels_bwd_kernel(
     // Upstream gradient
     const S* __restrict__ v_render_output,     // [C, dim0, dim1]
     // Output gradients
+    vec2<S>* __restrict__ v_means2d_abs,       // [C * N, 2] optional (can be nullptr)
     vec2<S>* __restrict__ v_means2d,           // [C * N, 2]
     vec3<S>* __restrict__ v_conics,            // [C * N, 3]
     S* __restrict__ v_opacities,               // [C * N]
@@ -236,6 +237,13 @@ __global__ void rasterize_to_pixels_bwd_kernel(
                 atomicAdd(v_xy_ptr, v_xy_local.x);
                 atomicAdd(v_xy_ptr + 1, v_xy_local.y);
 
+                // AbsGrad (optional): accumulate absolute projected-mean gradients
+                if (v_means2d_abs != nullptr) {
+                    S* v_xy_abs_ptr = reinterpret_cast<S*>(v_means2d_abs) + 2 * g;
+                    atomicAdd(v_xy_abs_ptr, fabsf(v_xy_local.x));
+                    atomicAdd(v_xy_abs_ptr + 1, fabsf(v_xy_local.y));
+                }
+
                 S* v_conic_ptr = reinterpret_cast<S*>(v_conics) + 3 * g;
                 atomicAdd(v_conic_ptr, v_conic_local.x);
                 atomicAdd(v_conic_ptr + 1, v_conic_local.y);
@@ -261,6 +269,7 @@ void launch_rasterize_to_pixels_bwd(
     const int32_t* __restrict__ tile_offsets,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    S* __restrict__ v_means2d_abs,
     S* __restrict__ v_means2d,
     S* __restrict__ v_conics,
     S* __restrict__ v_opacities,
@@ -317,6 +326,7 @@ void launch_rasterize_to_pixels_bwd(
         tile_offsets,
         flatten_ids,
         v_render_output,
+        reinterpret_cast<vec2<S>*>(v_means2d_abs),
         reinterpret_cast<vec2<S>*>(v_means2d),
         reinterpret_cast<vec3<S>*>(v_conics),
         v_opacities,
@@ -332,7 +342,7 @@ template void launch_rasterize_to_pixels_bwd<float>(
     const float*, const float*, const float*, const float*,
     const int32_t*, const int32_t*,
     const float*,
-    float*, float*, float*, float*,
+    float*, float*, float*, float*, float*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     cudaStream_t
 );
@@ -341,7 +351,7 @@ template void launch_rasterize_to_pixels_bwd<double>(
     const double*, const double*, const double*, const double*,
     const int32_t*, const int32_t*,
     const double*,
-    double*, double*, double*, double*,
+    double*, double*, double*, double*, double*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     cudaStream_t
 );

@@ -887,7 +887,8 @@ def rasterize_to_pixels_bwd(
     dim1: int,
     dim0: int,
     tile_size: int = 16,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    absgrad: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Backward pass for CT rasterization.
     
@@ -942,10 +943,16 @@ def rasterize_to_pixels_bwd(
         ...     dim1, dim0
         ... )
     """
+    # Returns:
+    #   v_means2d_abs: (C,N,2) if absgrad enabled, else empty tensor
+    #   v_means2d:     (C,N,2)
+    #   v_conics:      (C,N,3)
+    #   v_opacities:   (C,N)
+    #   v_mus:         (C,N)
     return _rasterize_to_pixels_bwd(
         means2d, conics, opacities, mus,
         tile_offsets, flatten_ids, v_render_output,
-        dim1, dim0, tile_size
+        dim1, dim0, tile_size, absgrad
     )
 
 

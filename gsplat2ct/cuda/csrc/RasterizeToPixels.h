@@ -134,6 +134,9 @@ void launch_rasterize_to_pixels_bwd(
     const int32_t* __restrict__ tile_offsets,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    // Optional: absolute gradient accumulator for means2d (AbsGS)
+    // If nullptr, absgrad is disabled.
+    S* __restrict__ v_means2d_abs,
     S* __restrict__ v_means2d,
     S* __restrict__ v_conics,
     S* __restrict__ v_opacities,

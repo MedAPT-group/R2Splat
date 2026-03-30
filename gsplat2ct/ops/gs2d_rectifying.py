@@ -696,10 +696,10 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
         )
         
         # Backward: Rasterize
-        v_means2d, v_conics, v_opacities, v_mus = rasterize_to_pixels_bwd(
+        _v_means2d_abs, v_means2d, v_conics, v_opacities, v_mus = rasterize_to_pixels_bwd(
             means2d, conics, opacities, mus,
             tile_offsets, flatten_ids, v_render_output,
-            dim1, dim0, self.tile_size
+            dim1, dim0, self.tile_size, False
         )
         
         # Backward: ConicsMu

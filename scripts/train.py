@@ -106,6 +106,7 @@ def make_train_config(
         lambda_tv=cfg.trainer.lambda_tv,
         scale_min=cfg.model.scale_min,
         scale_max=cfg.model.scale_max,
+        absgrad=bool(getattr(cfg, "strategy", None) is not None and getattr(cfg.strategy, "absgrad", False)),
     )
     return config
 
@@ -290,6 +291,14 @@ def train(cfg: DictConfig) -> None:
     use_second_order = cfg.optim.use_second_order
     print(f"   Mode: {'Newton (second-order)' if use_second_order else 'Adam (first-order)'}")
 
+    # ---- Scheduler ----
+    from gsplat2ct.optim.scheduler import OptimizerScheduler
+    scheduler = OptimizerScheduler.from_hydra(getattr(cfg, "schedule", None) or {}, optimizer)
+
+    # ---- Strategy ----
+    from gsplat2ct.strategy import DefaultStrategy
+    strategy = DefaultStrategy(getattr(cfg, "strategy", None) or {})
+
     # ---- Training loop ----
     print("[5/5] Starting training...")
     loss_history: Dict[str, List[float]] = {"total": [], "image": [], "tv": []}
@@ -304,6 +313,7 @@ def train(cfg: DictConfig) -> None:
     )
 
     for step in progress:
+        scheduler.step(step, max_steps)
         raw_batch, train_iter = fetch_next_batch(train_iter, train_loader)
 
         # Image dimensions from the batch
@@ -339,8 +349,38 @@ def train(cfg: DictConfig) -> None:
             fwd, grad = operator.forward_backward1(params, data_obj, op_config)
             optimizer.add_grad(grad)
 
-        optimizer.step()
-        optimizer.zero_grad()
+        # Strategy: densify/prune (topology changes reset optimizer moments)
+        topology_changed = False
+        if strategy.want_refine(step):
+            v_means2d = grad.get_aux("v_means2d")
+            v_means2d_abs = grad.get_aux("v_means2d_abs")
+            if v_means2d is not None:
+                out = strategy.decide(
+                    gp,
+                    v_means2d=v_means2d,
+                    v_means2d_abs=v_means2d_abs,
+                    scale_min=cfg.model.scale_min,
+                    scale_max=cfg.model.scale_max,
+                )
+                changed = strategy.apply(
+                    gp,
+                    out,
+                    scale_min=cfg.model.scale_min,
+                    scale_max=cfg.model.scale_max,
+                )
+                if changed:
+                    params = gp.to_params()
+                    operator.initialize(params)
+                    optimizer.params = params
+                    optimizer.reset_moments()
+                    # Current step grads/hess were computed with the OLD topology.
+                    # Drop them and skip this step update to avoid shape mismatch.
+                    optimizer.zero_grad()
+                    topology_changed = True
+
+        if not topology_changed:
+            optimizer.step()
+            optimizer.zero_grad()
 
         # Logging
         loss_total = fwd.outputs["loss"].item()

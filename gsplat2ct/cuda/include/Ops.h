@@ -732,7 +732,7 @@ torch::Tensor rasterize_to_pixels_fwd_tensor(
  *   - v_opacities: Gradient w.r.t. opacities (C, N)
  *   - v_mus: Gradient w.r.t. mus (C, N)
  */
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 rasterize_to_pixels_bwd_tensor(
     const torch::Tensor& means2d,
     const torch::Tensor& conics,
@@ -743,7 +743,8 @@ rasterize_to_pixels_bwd_tensor(
     const torch::Tensor& v_render_output,
     const uint32_t dim1,
     const uint32_t dim0,
-    const uint32_t tile_size
+    const uint32_t tile_size,
+    const bool absgrad
 );
 
 /**
@@ -790,7 +791,7 @@ rasterize_to_pixels_bwd_tensor(
  *   - h_opacities: Scalar Hessian w.r.t. opacities (C, N)
  */
 std::tuple<
-    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,  // First-order gradients
+    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,   // First-order gradients: v_means2d, v_conics, v_opacities, v_mus
     torch::Tensor, torch::Tensor,                                 // Full Hessians
     torch::Tensor, torch::Tensor, torch::Tensor,                  // Cross-term Hessians (mu-mean, mu-conic, mean-conic)
     torch::Tensor, torch::Tensor, torch::Tensor,                  // Cross-term Hessians involving opacity

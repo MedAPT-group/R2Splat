@@ -355,10 +355,11 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             lambda_l1, lambda_ssim
         )
 
-        v_means2d, v_conics_2d, v_opacity_rast, v_mus = rasterize_to_pixels_bwd(
+        absgrad = bool(config.get("absgrad", False)) if config is not None else False
+        v_means2d_abs, v_means2d, v_conics_2d, v_opacity_rast, v_mus = rasterize_to_pixels_bwd(
             means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d, v_render_img,
-            img_dim1, img_dim0, img_tile_size
+            img_dim1, img_dim0, img_tile_size, absgrad
         )
 
         v_cov2d_3x3 = conics_mu_bwd(
@@ -411,9 +412,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
                 'render_image': render_img.detach(),
                 'render_volume': render_vol.detach(),
             },
-            intermediates={
-                'v_means2d': v_means2d,
-            }
+            intermediates={}
         )
         grad_result = GradResult(
             param_grads={
@@ -421,7 +420,11 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
                 'quats': v_quats,
                 'scale_ori': v_scale_ori,
                 'opacity': v_opacity_total,
-            }
+            },
+            aux={
+                'v_means2d': v_means2d,
+                'v_means2d_abs': v_means2d_abs,
+            },
         )
         return forward_result, grad_result
 
@@ -675,9 +678,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
                 'render_image': render_img.detach(),
                 'render_volume': render_vol.detach(),
             },
-            intermediates={
-                'v_means2d': v_means2d_r,
-            }
+            intermediates={}
         )
 
         grad_result = GradResult(
@@ -686,7 +687,10 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
                 'quats': v_quats,
                 'scale_ori': v_scale_ori,
                 'opacity': v_opacity_total,
-            }
+            },
+            aux={
+                'v_means2d': v_means2d_r,
+            },
         )
 
         hess_result = HessResult(

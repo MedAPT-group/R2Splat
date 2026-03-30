@@ -179,6 +179,7 @@ class ForwardResult:
 class GradResult:
     """First-order gradient result."""
     param_grads: Dict[str, torch.Tensor] = field(default_factory=dict)
+    aux: Dict[str, Any] = field(default_factory=dict)
 
     def get(self, name: str) -> torch.Tensor:
         return self.param_grads[name]
@@ -194,6 +195,15 @@ class GradResult:
             self.param_grads[name] = grad
         for k, v in kwargs.items():
             self.param_grads[k] = v
+
+    def get_aux(self, name: str, default: Any = None) -> Any:
+        return self.aux.get(name, default)
+
+    def set_aux(self, name: str = None, value: Any = None, **kwargs) -> None:
+        if name is not None:
+            self.aux[name] = value
+        for k, v in kwargs.items():
+            self.aux[k] = v
 
 
 @dataclass

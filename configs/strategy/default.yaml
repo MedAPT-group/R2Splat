@@ -1,0 +1,25 @@
+enabled: true
+
+# Whether to compute and use AbsGrad (sum of |dL/d(means2d)|) for densification.
+absgrad: true
+
+refine_start_iter: 500
+refine_stop_iter: 30000
+refine_every: 200
+
+# Prune Gaussians whose |opacity| is below this threshold.
+prune_opa_abs: 1.0e-6
+
+# Grow criterion based on 2D mean gradient magnitude (either v_means2d_abs or |v_means2d|).
+grow_grad2d: 5.0e-4
+
+# If scale_3d = max(activated_scales) is above this threshold -> split, else duplicate.
+grow_scale3d: 0.09
+
+# Limits
+min_remaining: 100
+max_gaussians: 200000
+
+# Split behavior
+split_scales_div: 1.6
+

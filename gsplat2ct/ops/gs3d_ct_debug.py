@@ -261,10 +261,10 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
             render_img, targets, mu_r, mu_m, f1, f2, f3, f4,
             grad_one, window_size, lambda_l1, lambda_ssim
         )
-        v_means2d, v_conics_2d, v_opacity_rast, v_mus = rasterize_to_pixels_bwd(
+        v_means2d_abs, v_means2d, v_conics_2d, v_opacity_rast, v_mus = rasterize_to_pixels_bwd(
             means2d, conics_2d, opacity_2d, mus,
             tile_offsets_2d, flatten_ids_2d, v_render_img,
-            img_dim1, img_dim0, img_tile_size
+            img_dim1, img_dim0, img_tile_size, False
         )
         v_cov2d_3x3 = conics_mu_bwd(
             cov2d_3x3, eps_blur, conics_2d, mus, v_conics_2d, v_mus

@@ -5,5 +5,7 @@ defaults:
   - model: default
   - trainer: default
   - optim: default
+  - schedule: none
   - exp: 25_views
+  - strategy: none
   - _self_
