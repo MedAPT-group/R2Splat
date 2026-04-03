@@ -133,34 +133,31 @@ def _ssim(img1: torch.Tensor, img2: torch.Tensor, window: torch.Tensor,
 
 def tv_3d_loss(vol: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     """
-    Smooth Total Variation loss for 3D volumes (mean reduction).
-    
-    Uses smooth approximation: sqrt(x^2 + eps) instead of |x|
-    This gives well-defined second-order derivatives everywhere.
-    
+    Smooth Total Variation loss for 3D volumes.
+
+    Uses sqrt(diff^2 + eps) on forward differences along D, H, W (same edges as CUDA
+    ``volume_loss_fwd``). The sum of per-edge terms is divided by **B*D*H*W** (voxel
+    count), matching ``Loss.cpp`` ``volume_loss_fwd`` — not by edge count.
+
     Args:
         vol: Volume tensor of shape (B, D, H, W)
         eps: Smoothing parameter (default: 1e-4)
-    
+
     Returns:
         TV loss scalar
     """
     assert vol.dim() == 4, f"Expected 4D volume (B, D, H, W), got shape {vol.shape}"
-    
+
     B, D, H, W = vol.shape
-    
+
     dx = torch.diff(vol, dim=1)  # Along D
     dy = torch.diff(vol, dim=2)  # Along H
     dz = torch.diff(vol, dim=3)  # Along W
 
     tv = torch.sum(torch.sqrt(dx ** 2 + eps)) + torch.sum(torch.sqrt(dy ** 2 + eps)) + torch.sum(torch.sqrt(dz ** 2 + eps))
 
-    total_elements = B * (
-        (D - 1) * H * W
-        + D * (H - 1) * W
-        + D * H * (W - 1)
-    )
-    return tv / total_elements
+    num_voxels = B * D * H * W
+    return tv / num_voxels
 
 
 # ============================================================================
@@ -326,9 +323,9 @@ class ImageLossAutograd(SecondForwardBackwardBase):
 class VolumeLossAutograd(SecondForwardBackwardBase):
     """
     Smooth Total Variation (TV) regularization loss for 3D volumes.
-    
-    Loss = SmoothTV(volume) = mean(Σ sqrt(|∇volume|² + eps))
-    
+
+    Loss matches CUDA ``volume_loss_fwd``: sum of per-edge sqrt(d^2+eps) divided by B*D*H*W.
+
     Supports only: (B, D, H, W) - multi-batch 3D volumes without channel dimension
     
     This class computes:
@@ -1081,11 +1078,12 @@ class ImageLossTorchPixelParallel(SecondForwardBackwardBase):
 class VolumeLossTorch(SecondForwardBackwardBase):
     """
     Manual torch implementation of smooth TV loss for 3D volumes.
-    
+
     Supports only: (B, D, H, W) - multi-batch 3D volumes without channel dimension
-    
-    Loss = SmoothTV(volume) = mean(Σ sqrt(|∇volume|² + eps))
-    
+
+    Normalization matches CUDA ``volume_loss_*``: scalar is (sum of sqrt(d^2+eps) over
+    edges) / (B*D*H*W); manual grad/Hess divide by the same voxel count.
+
     Args:
         eps: Smoothing parameter for smooth TV (default: 1e-4)
     """
@@ -1169,13 +1167,10 @@ class VolumeLossTorch(SecondForwardBackwardBase):
         return forward_result, grad_result, hess_result
     
     def _compute_smooth_tv_grad_manual(self, volume: torch.Tensor, eps: float) -> torch.Tensor:
-        """Manually compute smooth TV gradient.
-        
-        For smooth TV: sqrt(x^2 + eps), gradient is x / sqrt(x^2 + eps)
-        """
+        """Manually compute smooth TV gradient (same normalization as CUDA ``volume_loss_bwd``)."""
         B, D, H, W = volume.shape
-        N = B * ((D - 1) * H * W + D * (H - 1) * W + D * H * (W - 1))
-        
+        num_voxels = B * D * H * W
+
         grad = torch.zeros_like(volume)
         
         # D direction
@@ -1195,18 +1190,14 @@ class VolumeLossTorch(SecondForwardBackwardBase):
         smooth_sign_w = diff_w / torch.sqrt(diff_w ** 2 + eps)
         grad[:, :, :, 1:] += smooth_sign_w
         grad[:, :, :, :-1] -= smooth_sign_w
-        
-        return grad / N
-    
+
+        return grad / num_voxels
+
     def _compute_smooth_tv_hess_manual(self, volume: torch.Tensor, eps: float) -> torch.Tensor:
-        """Manually compute smooth TV diagonal Hessian.
-        
-        For smooth TV: sqrt(x^2 + eps), second derivative is eps / (x^2 + eps)^(3/2)
-        Each voxel participates in up to 6 differences (3 as start, 3 as end).
-        """
+        """Diagonal Hessian of smooth TV w.r.t. volume (CUDA ``volume_loss_bwd2`` normalization)."""
         B, D, H, W = volume.shape
-        N = B * ((D - 1) * H * W + D * (H - 1) * W + D * H * (W - 1))
-        
+        num_voxels = B * D * H * W
+
         hess = torch.zeros_like(volume)
         
         def smooth_hess_fn(diff):
@@ -1230,8 +1221,8 @@ class VolumeLossTorch(SecondForwardBackwardBase):
         sh_w = smooth_hess_fn(diff_w)
         hess[:, :, :, 1:] += sh_w
         hess[:, :, :, :-1] += sh_w
-        
-        return hess / N
+
+        return hess / num_voxels
 
 
 # ============================================================================

@@ -100,7 +100,7 @@ def make_params_data_config(
     config.set('img_tile_size', 7)
     config.set('eps_blur', 0.0001)
     config.set('lambda_l2', 1.0)
-    config.set('lambda_ssim', 0.0) # 0.25
+    config.set('lambda_ssim', 1.0) # 0.25
     config.set('window_size', 11)
     config.set('vol_dim2', vol_dim2)
     config.set('vol_dim1', vol_dim1)
