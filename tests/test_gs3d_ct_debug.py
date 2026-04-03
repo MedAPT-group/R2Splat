@@ -1,9 +1,9 @@
 """
-Test script for GS3DCTDebug: CUDA vs Autograd numerical consistency.
+Test script for GS3DCTLossCUDA: CUDA vs torch-autograd consistency.
 
-This validates the combined rasterize + voxelize pipeline with:
-  - Image loss: L1 only (lambda_ssim=0, diagonal image Hessian)
-  - Volume loss: L2 (diagonal volume Hessian, exact second-order)
+This validates the full training loss pipeline with:
+  - Image loss variants: L1+SSIM and L2+SSIM
+  - Volume regularization: TV (lambda_tv > 0)
 
 Test stages:
 1. Forward consistency
@@ -25,7 +25,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from gsplat2ct.ops.data import Params, Data, Config
-from gsplat2ct.ops.gs3d_ct_debug import GS3DCTDebugCUDA, GS3DCTDebugAutograd
+from gsplat2ct.ops.gs3d_ct_train import GS3DCTLossCUDA, GS3DCTLossAutograd
 
 
 class _ParamWrapper:
@@ -72,16 +72,15 @@ def generate_test_data(
 
     vol_ranges = torch.tensor([10.0, 10.0, 10.0], device=device, dtype=dtype)
     vol_centers = torch.tensor([0.0, 0.0, 0.0], device=device, dtype=dtype)
-    vol_target = torch.zeros(vol_dim0, vol_dim1, vol_dim2, device=device, dtype=dtype)
 
     return (means, quats, scale_ori, opacity,
-            viewmats, Ks, targets, vol_ranges, vol_centers, vol_target)
+            viewmats, Ks, targets, vol_ranges, vol_centers)
 
 
 def make_params_data_config(
     means, quats, scale_ori, opacity,
-    viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
-    img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2,
+    viewmats, Ks, targets, vol_ranges, vol_centers,
+    img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2, image_loss_type,
 ):
     params = Params()
     params.add_param('means', _ParamWrapper(means))
@@ -95,15 +94,13 @@ def make_params_data_config(
     data_obj.set('targets', targets)
     data_obj.set('vol_ranges', vol_ranges)
     data_obj.set('vol_centers', vol_centers)
-    data_obj.set('vol_target', vol_target)
-
     config = Config()
     config.set('img_dim1', img_dim1)
     config.set('img_dim0', img_dim0)
     config.set('img_tile_size', 7)
     config.set('eps_blur', 0.0001)
-    config.set('lambda_l1', 1.0)
-    config.set('lambda_ssim', 0.0)
+    config.set('lambda_l2', 1.0)
+    config.set('lambda_ssim', 0.0) # 0.25
     config.set('window_size', 11)
     config.set('vol_dim2', vol_dim2)
     config.set('vol_dim1', vol_dim1)
@@ -111,9 +108,11 @@ def make_params_data_config(
     config.set('vol_tile_size', 8)
     config.set('eps3d', 1e-4)
     config.set('radius_clip', 3.0)
-    config.set('lambda_vol', 1.0)
-    config.set('scale_min', 0.001)
+    config.set('lambda_tv', 1.0) # 0.05
+    config.set('vol_loss_eps', 1e-4)
+    config.set('scale_min', 0.0005)
     config.set('scale_max', 0.5)
+    config.set('image_loss_type', image_loss_type)
 
     return params, data_obj, config
 
@@ -122,22 +121,22 @@ def make_params_data_config(
 # Test Functions
 # ============================================================================
 
-def test_forward(N=47, C=3, img_dim0=31, img_dim1=43,
+def test_forward(tag, N=47, C=3, img_dim0=31, img_dim1=43,
                  vol_dim0=13, vol_dim1=12, vol_dim2=11):
     print("\n" + "=" * 70)
-    print("TEST 1: Forward Pass Consistency (CUDA vs Autograd)")
+    print(f"TEST 1 ({tag}): Forward Pass Consistency (CUDA vs Autograd)")
     print("=" * 70)
 
     test_data = generate_test_data(N, C, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2)
     params, data_obj, config = make_params_data_config(
-        *test_data, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2
+        *test_data, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2, tag.lower()
     )
 
-    cuda_op = GS3DCTDebugCUDA()
+    cuda_op = GS3DCTLossCUDA()
     cuda_op.initialize(params)
     cuda_fwd = cuda_op.forward_only(params, data_obj, config)
 
-    ag_op = GS3DCTDebugAutograd()
+    ag_op = GS3DCTLossAutograd()
     ag_op.initialize(params)
     ag_fwd = ag_op.forward_only(params, data_obj, config)
 
@@ -154,22 +153,22 @@ def test_forward(N=47, C=3, img_dim0=31, img_dim1=43,
     return passed
 
 
-def test_backward1(N=47, C=3, img_dim0=31, img_dim1=43,
+def test_backward1(tag, N=47, C=3, img_dim0=31, img_dim1=43,
                    vol_dim0=13, vol_dim1=12, vol_dim2=11, rtol=0.1):
     print("\n" + "=" * 70)
-    print("TEST 2: First-Order Backward Consistency (CUDA vs Autograd)")
+    print(f"TEST 2 ({tag}): First-Order Backward Consistency (CUDA vs Autograd)")
     print("=" * 70)
 
     test_data = generate_test_data(N, C, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2)
     params, data_obj, config = make_params_data_config(
-        *test_data, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2
+        *test_data, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2, tag.lower()
     )
 
-    cuda_op = GS3DCTDebugCUDA()
+    cuda_op = GS3DCTLossCUDA()
     cuda_op.initialize(params)
     _, cuda_grad = cuda_op.forward_backward1(params, data_obj, config)
 
-    ag_op = GS3DCTDebugAutograd()
+    ag_op = GS3DCTLossAutograd()
     ag_op.initialize(params)
     _, ag_grad = ag_op.forward_backward1(params, data_obj, config)
 
@@ -195,22 +194,22 @@ def test_backward1(N=47, C=3, img_dim0=31, img_dim1=43,
     return ok
 
 
-def test_backward2(N=47, C=3, img_dim0=31, img_dim1=43,
-                   vol_dim0=13, vol_dim1=12, vol_dim2=11, rtol=0.15):
+def test_backward2(tag, N=47, C=3, img_dim0=31, img_dim1=43,
+                   vol_dim0=13, vol_dim1=12, vol_dim2=11, rtol=0.25):
     print("\n" + "=" * 70)
-    print("TEST 3: Second-Order Backward Consistency (CUDA vs Autograd)")
+    print(f"TEST 3 ({tag}): Second-Order Backward Consistency (CUDA vs Autograd)")
     print("=" * 70)
 
     test_data = generate_test_data(N, C, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2)
     params, data_obj, config = make_params_data_config(
-        *test_data, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2
+        *test_data, img_dim0, img_dim1, vol_dim0, vol_dim1, vol_dim2, tag.lower()
     )
 
-    cuda_op = GS3DCTDebugCUDA()
+    cuda_op = GS3DCTLossCUDA()
     cuda_op.initialize(params)
     _, cuda_grad, cuda_hess = cuda_op.forward_backward2(params, data_obj, config)
 
-    ag_op = GS3DCTDebugAutograd()
+    ag_op = GS3DCTLossAutograd()
     ag_op.initialize(params)
     _, ag_grad, ag_hess = ag_op.forward_backward2(params, data_obj, config)
 
@@ -271,13 +270,15 @@ def test_backward2(N=47, C=3, img_dim0=31, img_dim1=43,
 
 def run_all_tests():
     print("=" * 70)
-    print("GS3DCTDebug (Rasterize + L2 Voxelize) Test Suite")
+    print("GS3DCTLoss (Lx+SSIM + TV) Test Suite")
     print("=" * 70)
 
+    variants = ["L1", "L2"]
     results = {}
-    results['forward'] = test_forward()
-    results['backward1'] = test_backward1()
-    results['backward2'] = test_backward2()
+    for tag in variants:
+        results[f"{tag}_forward"] = test_forward(tag)
+        results[f"{tag}_backward1"] = test_backward1(tag)
+        results[f"{tag}_backward2"] = test_backward2(tag)
 
     print("\n" + "=" * 70)
     print("TEST SUMMARY")

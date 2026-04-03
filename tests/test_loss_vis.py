@@ -317,7 +317,7 @@ def optimize_image(
     
     # Setup loss function and optimizer
     loss_fn = ImageLossCUDA(
-        lambda_l1=1.0,
+        lambda_l2=1.0,
         lambda_ssim=0.25,
         window_size=11
     )

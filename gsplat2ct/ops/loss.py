@@ -2,9 +2,9 @@
 Loss Functions with Second-Order Derivatives
 
 This module provides loss function implementations for image and volume reconstruction:
-1. ImageLossAutograd: L1 + SSIM weighted loss for image reconstruction (autograd)
-2. ImageLossTorch: L1 + SSIM weighted loss (manual torch implementation)
-3. ImageLossCUDA: L1 + SSIM weighted loss (CUDA-accelerated)
+1. ImageLossAutograd: L2 (MSE) + SSIM weighted loss for image reconstruction (autograd)
+2. ImageLossTorch: L2 (MSE) + SSIM weighted loss (manual torch implementation)
+3. ImageLossCUDA: L2 (MSE) + SSIM weighted loss (CUDA-accelerated)
 4. VolumeLossAutograd: Total Variation (TV) loss for volume regularization
 
 Simplified to support:

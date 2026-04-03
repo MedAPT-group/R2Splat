@@ -5,11 +5,11 @@ enabled: true
 # damping(t) = damping_base * damping_factor(t)  (only if second-order mode)
 
 lr:
-  type: "cosine"
-  warmup_steps: 0
-  min_factor: 0.1
+  type: "exp" # r2-gaussian like
+  warmup_steps: 0 # r2-gaussian like
+  min_factor: 0.1 # r2-gaussian like
 
-damping:
+damping: # useless since we don't use second-order mode
   type: "constant"
   warmup_steps: 0
   min_factor: 1.0

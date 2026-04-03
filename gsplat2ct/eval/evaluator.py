@@ -10,7 +10,6 @@ Both use the forward-only operators (``GS3DCTRasterizeCUDA``,
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-import torch.utils.data
 
 from gsplat2ct.ops.data import Params, Data, Config, ForwardResult
 from gsplat2ct.ops.gs3d_ct_rasterize import GS3DCTRasterizeCUDA
@@ -54,15 +53,13 @@ class ProjectionEvaluator:
     @torch.no_grad()
     def evaluate(
         self,
-        dataset: torch.utils.data.Dataset,
+        dataset: Any,
         device: torch.device,
         max_vis: int = 5,
     ) -> Tuple[Dict[str, float], List[Tuple[torch.Tensor, torch.Tensor]]]:
         """Run evaluation on *dataset* and return aggregate metrics plus
         up to *max_vis* (pred, target) image pairs for visualization."""
-        loader = torch.utils.data.DataLoader(
-            dataset, batch_size=1, shuffle=False, num_workers=0
-        )
+        dataset.preload_to(device)
 
         psnr_vals, ssim_vals = [], []
         vis_pairs: List[Tuple[torch.Tensor, torch.Tensor]] = []
@@ -71,10 +68,11 @@ class ProjectionEvaluator:
             np.linspace(0, len(dataset) - 1, max_vis, dtype=int).tolist()
         )
 
-        for idx, batch in enumerate(loader):
-            c2w = batch["camtoworld"].to(device).contiguous()
-            K = batch["K"].to(device).contiguous()
-            gt = batch["image"].to(device).contiguous()
+        for idx in range(len(dataset)):
+            batch = dataset.get_batch(idx)
+            c2w = batch["camtoworld"].contiguous()
+            K = batch["K"].contiguous()
+            gt = batch["image"].contiguous()
 
             viewmats = torch.linalg.inv(c2w).contiguous()
             C = viewmats.shape[0]

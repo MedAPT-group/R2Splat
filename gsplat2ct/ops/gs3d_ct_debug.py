@@ -1,7 +1,7 @@
 """
 GS3DCTDebugCUDA / GS3DCTDebugAutograd: Debug operators for numerical validation.
 
-Same architecture as GS3DCTTrainCUDA, but with two key changes for testability:
+Same architecture as GS3DCTLossCUDA, but with two key changes for testability:
   1. Volume loss uses L2 (MSE) instead of TV, so the volume Hessian is exactly
      diagonal and the CUDA second-order chain rule is exact.
   2. Image loss should be called with lambda_ssim=0 so that the image Hessian
@@ -16,10 +16,11 @@ Author: Dy164
 Date: 2026-03-19
 """
 
+from contextlib import contextmanager
 import torch
 from typing import Optional, Tuple
 from .base import SecondForwardBackwardBase
-from .data import Params, Data, Config, ForwardResult, GradResult, HessResult
+from .data import Params, Data, Config, ForwardResult, GradResult, HessResult, get_lambda_l2
 
 
 class _ParamWrapper:
@@ -33,12 +34,12 @@ class _ParamWrapper:
 # ============================================================================
 
 class GS3DCTDebugCUDA(SecondForwardBackwardBase):
-    """Debug CUDA operator: ImageLoss(L1 only) + L2 volume loss.
+    """Debug CUDA operator: image L2 (MSE) loss when lambda_ssim=0 + L2 volume loss.
 
-    Same interface as GS3DCTTrainCUDA but replaces VolumeLoss(TV) with L2Loss
+    Same interface as GS3DCTLossCUDA but replaces VolumeLoss(TV) with L2Loss
     for exact second-order numerical validation.
 
-    Expected params/data/config: same as GS3DCTTrainCUDA, plus:
+    Expected params/data/config: same as GS3DCTLossCUDA, plus:
         data['vol_target']: (dim0, dim1, dim2) target volume for L2 loss
     """
 
@@ -69,7 +70,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         img_dim0 = config.get('img_dim0')
         img_tile_size = config.get('img_tile_size', 16)
         eps_blur = config.get('eps_blur', 0.3)
-        lambda_l1 = config.get('lambda_l1', 1.0)
+        lambda_l2 = get_lambda_l2(config, 1.0)
         lambda_ssim = config.get('lambda_ssim', 0.0)
         window_size = config.get('window_size', 11)
 
@@ -87,7 +88,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         return (means, quats, scale_ori, opacity,
                 viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
                 img_dim1, img_dim0, img_tile_size, eps_blur,
-                lambda_l1, lambda_ssim, window_size,
+                lambda_l2, lambda_ssim, window_size,
                 vol_dim2, vol_dim1, vol_dim0, vol_tile_size,
                 eps3d, radius_clip, lambda_vol,
                 scale_min, scale_max)
@@ -106,7 +107,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
          img_dim1, img_dim0, img_tile_size, eps_blur,
-         lambda_l1, lambda_ssim, window_size,
+         lambda_l2, lambda_ssim, window_size,
          vol_dim2, vol_dim1, vol_dim0, vol_tile_size,
          eps3d, radius_clip, lambda_vol,
          scale_min, scale_max) = self._extract(params, data, config)
@@ -139,7 +140,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         )
         img_loss = image_loss_fwd(
             render_img, targets, window_size,
-            lambda_l1, lambda_ssim, compute_statistics=False
+            lambda_l2, lambda_ssim, compute_statistics=False
         )[0]
 
         # Voxelize path (L2 loss)
@@ -194,7 +195,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
          img_dim1, img_dim0, img_tile_size, eps_blur,
-         lambda_l1, lambda_ssim, window_size,
+         lambda_l2, lambda_ssim, window_size,
          vol_dim2, vol_dim1, vol_dim0, vol_tile_size,
          eps3d, radius_clip, lambda_vol,
          scale_min, scale_max) = self._extract(params, data, config)
@@ -227,7 +228,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         )
         img_loss_result = image_loss_fwd(
             render_img, targets, window_size,
-            lambda_l1, lambda_ssim, compute_statistics=True
+            lambda_l2, lambda_ssim, compute_statistics=True
         )
         img_loss = img_loss_result[0]
         mu_r, mu_m = img_loss_result[3], img_loss_result[4]
@@ -259,7 +260,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         # BACKWARD: Rasterize path
         v_render_img = image_loss_bwd(
             render_img, targets, mu_r, mu_m, f1, f2, f3, f4,
-            grad_one, window_size, lambda_l1, lambda_ssim
+            grad_one, window_size, lambda_l2, lambda_ssim
         )
         v_means2d_abs, v_means2d, v_conics_2d, v_opacity_rast, v_mus = rasterize_to_pixels_bwd(
             means2d, conics_2d, opacity_2d, mus,
@@ -326,7 +327,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         (means, quats, scale_ori, opacity,
          viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
          img_dim1, img_dim0, img_tile_size, eps_blur,
-         lambda_l1, lambda_ssim, window_size,
+         lambda_l2, lambda_ssim, window_size,
          vol_dim2, vol_dim1, vol_dim0, vol_tile_size,
          eps3d, radius_clip, lambda_vol,
          scale_min, scale_max) = self._extract(params, data, config)
@@ -361,7 +362,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         )
         img_loss_result = image_loss_fwd(
             render_img, targets, window_size,
-            lambda_l1, lambda_ssim, compute_statistics=True
+            lambda_l2, lambda_ssim, compute_statistics=True
         )
         img_loss = img_loss_result[0]
         mu_r, mu_m = img_loss_result[3], img_loss_result[4]
@@ -393,11 +394,11 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
         # ========== RASTERIZE PATH: backward2 ==========
         v_render_img = image_loss_bwd(
             render_img, targets, mu_r, mu_m, f1, f2, f3, f4,
-            grad_one, window_size, lambda_l1, lambda_ssim
+            grad_one, window_size, lambda_l2, lambda_ssim
         )
         h_render_img = image_loss_bwd2(
             render_img, targets, mu_r, mu_m, f1, f2, f3, f4,
-            grad_one, window_size, lambda_l1, lambda_ssim
+            grad_one, window_size, lambda_l2, lambda_ssim
         )
 
         (v_means2d_r, v_conics_2d_r, v_opacity_rast, v_mus_r,
@@ -516,7 +517,7 @@ class GS3DCTDebugCUDA(SecondForwardBackwardBase):
 # ============================================================================
 
 class GS3DCTDebugAutograd(SecondForwardBackwardBase):
-    """Pure autograd reference: ImageLoss(L1) + L2 volume loss.
+    """Pure autograd reference: image L2 (MSE) + L2 volume loss.
 
     Uses double autograd for exact Hessian computation.
     """
@@ -534,7 +535,7 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         self,
         means, quats, scale_ori, opacity,
         viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
-        img_dim1, img_dim0, eps_blur, lambda_l1,
+        img_dim1, img_dim0, eps_blur, lambda_l2,
         vol_dim2, vol_dim1, vol_dim0, eps3d,
         lambda_vol, scale_min, scale_max,
     ):
@@ -585,7 +586,7 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         alpha_masked = torch.where(mask, alpha, torch.zeros_like(alpha))
         render_img = alpha_masked.sum(dim=1)
 
-        img_loss = lambda_l1 * ((render_img - targets) ** 2).mean()
+        img_loss = lambda_l2 * ((render_img - targets) ** 2).mean()
 
         # ============ Voxelize path ============
         means3d_v, conics_3d, radii = _compute_world_to_volume_mapping(
@@ -781,7 +782,7 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
         img_dim1 = config.get('img_dim1')
         img_dim0 = config.get('img_dim0')
         eps_blur = config.get('eps_blur', 0.3)
-        lambda_l1 = config.get('lambda_l1', 1.0)
+        lambda_l2 = get_lambda_l2(config, 1.0)
 
         vol_dim2 = config.get('vol_dim2')
         vol_dim1 = config.get('vol_dim1')
@@ -794,9 +795,225 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
 
         return (means, quats, scale_ori, opacity,
                 viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
-                img_dim1, img_dim0, eps_blur, lambda_l1,
+                img_dim1, img_dim0, eps_blur, lambda_l2,
                 vol_dim2, vol_dim1, vol_dim0, eps3d,
                 lambda_vol, scale_min, scale_max)
 
 
-__all__ = ["GS3DCTDebugCUDA", "GS3DCTDebugAutograd"]
+def _debug_image_loss_fwd_l2_adapter(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.0,
+    compute_statistics: bool = True,
+):
+    from ..cuda._wrapper import l2_loss_fwd
+
+    loss_l2, _ = l2_loss_fwd(prediction, target)
+    loss = float(lambda_l2) * loss_l2
+    z = torch.zeros(1, device=prediction.device, dtype=prediction.dtype)
+    return (loss, loss_l2, z, z, z, z, z, z, z)
+
+
+def _debug_image_loss_fwd_l1_adapter(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.0,
+    compute_statistics: bool = True,
+):
+    diff = prediction - target
+    loss_l1 = diff.abs().mean()
+    loss = float(lambda_l2) * loss_l1
+    z = torch.zeros(1, device=prediction.device, dtype=prediction.dtype)
+    return (loss, loss_l1, z, z, z, z, z, z, z)
+
+
+def _debug_image_loss_bwd_l2_adapter(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mu_r: torch.Tensor,
+    mu_m: torch.Tensor,
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    f3: torch.Tensor,
+    f4: torch.Tensor,
+    grad_output: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.0,
+):
+    from ..cuda._wrapper import l2_loss_bwd
+
+    grad_scale = grad_output * float(lambda_l2)
+    return l2_loss_bwd(prediction, target, grad_scale)
+
+
+def _debug_image_loss_bwd_l1_adapter(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mu_r: torch.Tensor,
+    mu_m: torch.Tensor,
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    f3: torch.Tensor,
+    f4: torch.Tensor,
+    grad_output: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.0,
+):
+    numel = max(int(prediction.numel()), 1)
+    grad_scale = grad_output * float(lambda_l2) / float(numel)
+    return grad_scale * torch.sign(prediction - target)
+
+
+def _debug_image_loss_bwd2_l2_adapter(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mu_r: torch.Tensor,
+    mu_m: torch.Tensor,
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    f3: torch.Tensor,
+    f4: torch.Tensor,
+    grad_output: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.0,
+):
+    from ..cuda._wrapper import l2_loss_bwd2
+
+    grad_scale = grad_output * float(lambda_l2)
+    return l2_loss_bwd2(prediction, grad_scale)
+
+
+def _debug_image_loss_bwd2_l1_adapter(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mu_r: torch.Tensor,
+    mu_m: torch.Tensor,
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    f3: torch.Tensor,
+    f4: torch.Tensor,
+    grad_output: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.0,
+):
+    return torch.zeros_like(prediction)
+
+
+@contextmanager
+def _patched_debug_image_loss_funcs():
+    from ..cuda import _wrapper
+
+    old_fwd = _wrapper.image_loss_fwd
+    old_bwd = _wrapper.image_loss_bwd
+    old_bwd2 = _wrapper.image_loss_bwd2
+    _wrapper.image_loss_fwd = _debug_image_loss_fwd_l2_adapter
+    _wrapper.image_loss_bwd = _debug_image_loss_bwd_l2_adapter
+    _wrapper.image_loss_bwd2 = _debug_image_loss_bwd2_l2_adapter
+    try:
+        yield
+    finally:
+        _wrapper.image_loss_fwd = old_fwd
+        _wrapper.image_loss_bwd = old_bwd
+        _wrapper.image_loss_bwd2 = old_bwd2
+
+
+@contextmanager
+def _patched_debug_image_loss_funcs_l1():
+    from ..cuda import _wrapper
+
+    old_fwd = _wrapper.image_loss_fwd
+    old_bwd = _wrapper.image_loss_bwd
+    old_bwd2 = _wrapper.image_loss_bwd2
+    _wrapper.image_loss_fwd = _debug_image_loss_fwd_l1_adapter
+    _wrapper.image_loss_bwd = _debug_image_loss_bwd_l1_adapter
+    _wrapper.image_loss_bwd2 = _debug_image_loss_bwd2_l1_adapter
+    try:
+        yield
+    finally:
+        _wrapper.image_loss_fwd = old_fwd
+        _wrapper.image_loss_bwd = old_bwd
+        _wrapper.image_loss_bwd2 = old_bwd2
+
+
+class GS3DCTDebugLossL1CUDA(GS3DCTDebugCUDA):
+    """Debug CUDA operator with L1 image loss + L2 volume loss."""
+
+    def forward_only(self, params, data, config=None):
+        with _patched_debug_image_loss_funcs_l1():
+            return super().forward_only(params, data, config)
+
+    def forward_backward1(self, params, data, config=None):
+        with _patched_debug_image_loss_funcs_l1():
+            return super().forward_backward1(params, data, config)
+
+    def forward_backward2(self, params, data, config=None):
+        with _patched_debug_image_loss_funcs_l1():
+            return super().forward_backward2(params, data, config)
+
+
+class GS3DCTDebugLossL2CUDA(GS3DCTDebugCUDA):
+    """Debug CUDA operator with L2 image loss + L2 volume loss."""
+
+    def forward_only(self, params, data, config=None):
+        with _patched_debug_image_loss_funcs():
+            return super().forward_only(params, data, config)
+
+    def forward_backward1(self, params, data, config=None):
+        with _patched_debug_image_loss_funcs():
+            return super().forward_backward1(params, data, config)
+
+    def forward_backward2(self, params, data, config=None):
+        with _patched_debug_image_loss_funcs():
+            return super().forward_backward2(params, data, config)
+
+
+class GS3DCTDebugLossL1Autograd(GS3DCTDebugAutograd):
+    """Autograd debug reference with L1 image loss + L2 volume loss."""
+
+    def _forward_pipeline(
+        self,
+        means, quats, scale_ori, opacity,
+        viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
+        img_dim1, img_dim0, eps_blur, lambda_l2,
+        vol_dim2, vol_dim1, vol_dim0, eps3d,
+        lambda_vol, scale_min, scale_max,
+    ):
+        _loss_unused, render_img, render_vol = super()._forward_pipeline(
+            means, quats, scale_ori, opacity,
+            viewmats, Ks, targets, vol_ranges, vol_centers, vol_target,
+            img_dim1, img_dim0, eps_blur, lambda_l2,
+            vol_dim2, vol_dim1, vol_dim0, eps3d,
+            lambda_vol, scale_min, scale_max,
+        )
+        img_loss = float(lambda_l2) * (render_img - targets).abs().mean()
+        vol_loss = float(lambda_vol) * ((render_vol - vol_target) ** 2).mean()
+        return img_loss + vol_loss, render_img, render_vol
+
+GS3DCTDebugLossL2Autograd = GS3DCTDebugAutograd
+
+# Semantic aliases aligned with loss-level naming.
+GS3DCTLossL1DebugCUDA = GS3DCTDebugLossL1CUDA
+GS3DCTLossL1DebugAutograd = GS3DCTDebugLossL1Autograd
+GS3DCTLossL2DebugCUDA = GS3DCTDebugLossL2CUDA
+GS3DCTLossL2DebugAutograd = GS3DCTDebugLossL2Autograd
+
+__all__ = [
+    "GS3DCTDebugCUDA",
+    "GS3DCTDebugAutograd",
+    "GS3DCTDebugLossL1CUDA",
+    "GS3DCTDebugLossL1Autograd",
+    "GS3DCTDebugLossL2CUDA",
+    "GS3DCTDebugLossL2Autograd",
+    "GS3DCTLossL1DebugCUDA",
+    "GS3DCTLossL1DebugAutograd",
+    "GS3DCTLossL2DebugCUDA",
+    "GS3DCTLossL2DebugAutograd",
+]

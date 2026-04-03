@@ -34,7 +34,7 @@ namespace gsplat2ct {
  * @tparam S Scalar type (float, double)
  */
 template <typename S>
-void launch_image_loss_fwd(
+void launch_image_loss_l2_fwd(
     const S* __restrict__ prediction,       // (B, H, W)
     const S* __restrict__ target,           // (B, H, W)
     const S* __restrict__ gaussian_window,  // (window_size, window_size)
@@ -65,7 +65,7 @@ void launch_image_loss_fwd(
  * @tparam S Scalar type (float, double)
  */
 template <typename S>
-void launch_image_loss_bwd(
+void launch_image_loss_l2_bwd(
     const S* __restrict__ prediction,       // (B, H, W)
     const S* __restrict__ target,           // (B, H, W)
     const S* __restrict__ gaussian_window,  // (window_size, window_size)
@@ -98,7 +98,7 @@ void launch_image_loss_bwd(
  * @tparam S Scalar type (float, double)
  */
 template <typename S>
-void launch_image_loss_bwd2(
+void launch_image_loss_l2_bwd2(
     const S* __restrict__ prediction,       // (B, H, W)
     const S* __restrict__ target,           // (B, H, W)
     const S* __restrict__ gaussian_window,  // (window_size, window_size)
@@ -113,6 +113,71 @@ void launch_image_loss_bwd2(
     int B, int H, int W,
     int window_size,
     S lambda_l2,
+    S lambda_ssim,
+    S C1, S C2,
+    cudaStream_t stream
+);
+
+// ============================================================================
+// ImageLoss L1 + SSIM Launch Functions
+// ============================================================================
+
+template <typename S>
+void launch_image_loss_l1_fwd(
+    const S* __restrict__ prediction,       // (B, H, W)
+    const S* __restrict__ target,           // (B, H, W)
+    const S* __restrict__ gaussian_window,  // (window_size, window_size)
+    S* __restrict__ l1_map,                 // (B, H, W) - |pred - target|
+    S* __restrict__ mu_r,                   // (B, H, W) - optional
+    S* __restrict__ mu_m,                   // (B, H, W) - optional
+    S* __restrict__ f1,                     // (B, H, W) - optional
+    S* __restrict__ f2,                     // (B, H, W) - optional
+    S* __restrict__ f3,                     // (B, H, W) - optional
+    S* __restrict__ f4,                     // (B, H, W) - optional
+    S* __restrict__ ssim_map,               // (B, H, W)
+    int B, int H, int W,
+    int window_size,
+    bool compute_statistics,
+    cudaStream_t stream
+);
+
+template <typename S>
+void launch_image_loss_l1_bwd(
+    const S* __restrict__ prediction,       // (B, H, W)
+    const S* __restrict__ target,           // (B, H, W)
+    const S* __restrict__ gaussian_window,  // (window_size, window_size)
+    const S* __restrict__ mu_r,             // (B, H, W)
+    const S* __restrict__ mu_m,             // (B, H, W)
+    const S* __restrict__ f1,               // (B, H, W)
+    const S* __restrict__ f2,               // (B, H, W)
+    const S* __restrict__ f3,               // (B, H, W)
+    const S* __restrict__ f4,               // (B, H, W)
+    const S* __restrict__ grad_output,      // scalar
+    S* __restrict__ grad_pred,              // (B, H, W) - combined gradient
+    int B, int H, int W,
+    int window_size,
+    S lambda_l1,
+    S lambda_ssim,
+    S C1, S C2,
+    cudaStream_t stream
+);
+
+template <typename S>
+void launch_image_loss_l1_bwd2(
+    const S* __restrict__ prediction,       // (B, H, W)
+    const S* __restrict__ target,           // (B, H, W)
+    const S* __restrict__ gaussian_window,  // (window_size, window_size)
+    const S* __restrict__ mu_r,             // (B, H, W)
+    const S* __restrict__ mu_m,             // (B, H, W)
+    const S* __restrict__ f1,               // (B, H, W)
+    const S* __restrict__ f2,               // (B, H, W)
+    const S* __restrict__ f3,               // (B, H, W)
+    const S* __restrict__ f4,               // (B, H, W)
+    const S* __restrict__ grad_output,      // scalar
+    S* __restrict__ hessian_diag,           // (B, H, W)
+    int B, int H, int W,
+    int window_size,
+    S lambda_l1,
     S lambda_ssim,
     S C1, S C2,
     cudaStream_t stream

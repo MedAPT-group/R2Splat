@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Tuple
 
 from .base import SecondForwardBackwardBase
-from .data import Params, Data, Config, ForwardResult, GradResult, HessResult
+from .data import Params, Data, Config, ForwardResult, GradResult, HessResult, get_lambda_l2
 
 
 # ============================================================================
@@ -87,13 +87,13 @@ class GS2DRectifyingConfig(Config):
     Attributes:
         eps: ConicsMu blur epsilon (default 0.3)
         tile_size: Size of each tile in pixels (default 16)
-        lambda_l1: Weight for L2 loss (default 1.0)
+        lambda_l2: Weight for L2 loss (default 1.0)
         lambda_ssim: Weight for SSIM loss (default 0.0 for testing)
         window_size: SSIM window size (default 11)
     """
     eps: float = 0.3
     tile_size: int = 16
-    lambda_l1: float = 1.0
+    lambda_l2: float = 1.0
     lambda_ssim: float = 0.0
     window_size: int = 11
     
@@ -101,7 +101,7 @@ class GS2DRectifyingConfig(Config):
         """Sync named fields to options."""
         self.options['eps'] = self.eps
         self.options['tile_size'] = self.tile_size
-        self.options['lambda_l1'] = self.lambda_l1
+        self.options['lambda_l2'] = self.lambda_l2
         self.options['lambda_ssim'] = self.lambda_ssim
         self.options['window_size'] = self.window_size
 
@@ -128,13 +128,13 @@ class GS2DRectifyingAutograd(SecondForwardBackwardBase):
     def __init__(
         self,
         eps: float = 0.3,
-        lambda_l1: float = 1.0,
+        lambda_l2: float = 1.0,
         lambda_ssim: float = 0.0,
         window_size: int = 11,
         tile_size: int = 16,
     ):
         self.eps = eps
-        self.lambda_l1 = lambda_l1
+        self.lambda_l2 = lambda_l2
         self.lambda_ssim = lambda_ssim
         self.window_size = window_size
         self.tile_size = tile_size
@@ -243,10 +243,10 @@ class GS2DRectifyingAutograd(SecondForwardBackwardBase):
             target = data.get('target')
         
         eps = config.get('eps', self.eps) if config else self.eps
-        lambda_l1 = config.get('lambda_l1', self.lambda_l1) if config else self.lambda_l1
+        lambda_l2 = get_lambda_l2(config, self.lambda_l2)
         lambda_ssim = config.get('lambda_ssim', self.lambda_ssim) if config else self.lambda_ssim
         
-        return cov2d_3x3, means2d, opacities, target, eps, lambda_l1, lambda_ssim
+        return cov2d_3x3, means2d, opacities, target, eps, lambda_l2, lambda_ssim
     
     def forward_only(
         self,
@@ -255,7 +255,7 @@ class GS2DRectifyingAutograd(SecondForwardBackwardBase):
         config: Optional[Config] = None,
     ) -> ForwardResult:
         """Forward computation only."""
-        cov2d_3x3, means2d, opacities, target, eps, lambda_l1, lambda_ssim = \
+        cov2d_3x3, means2d, opacities, target, eps, lambda_l2, lambda_ssim = \
             self._extract_params(params, data, config)
         
         C, dim0, dim1 = target.shape
@@ -268,7 +268,7 @@ class GS2DRectifyingAutograd(SecondForwardBackwardBase):
         
         # Loss
         l2_loss = self._compute_l2_loss(render_output, target)
-        loss = lambda_l1 * l2_loss
+        loss = lambda_l2 * l2_loss
         
         if lambda_ssim > 0:
             from .loss import ssim
@@ -290,7 +290,7 @@ class GS2DRectifyingAutograd(SecondForwardBackwardBase):
         config: Optional[Config] = None,
     ) -> Tuple[ForwardResult, GradResult]:
         """Forward + first-order backward."""
-        cov2d_3x3_orig, means2d_orig, opacities_orig, target, eps, lambda_l1, lambda_ssim = \
+        cov2d_3x3_orig, means2d_orig, opacities_orig, target, eps, lambda_l2, lambda_ssim = \
             self._extract_params(params, data, config)
         
         # Create leaf tensors with gradients
@@ -304,7 +304,7 @@ class GS2DRectifyingAutograd(SecondForwardBackwardBase):
         conics, mus = self._compute_conics_mu(cov2d_3x3, eps)
         render_output = self._rasterize_torch(means2d, conics, opacities, mus, dim0, dim1)
         l2_loss = self._compute_l2_loss(render_output, target)
-        loss = lambda_l1 * l2_loss
+        loss = lambda_l2 * l2_loss
         
         if lambda_ssim > 0:
             from .loss import ssim
@@ -336,7 +336,7 @@ class GS2DRectifyingAutograd(SecondForwardBackwardBase):
         config: Optional[Config] = None,
     ) -> Tuple[ForwardResult, GradResult, HessResult]:
         """Forward + first-order + second-order backward using torch autograd."""
-        cov2d_3x3_orig, means2d_orig, opacities_orig, target, eps, lambda_l1, lambda_ssim = \
+        cov2d_3x3_orig, means2d_orig, opacities_orig, target, eps, lambda_l2, lambda_ssim = \
             self._extract_params(params, data, config)
         
         # Create leaf tensors with gradients
@@ -353,7 +353,7 @@ class GS2DRectifyingAutograd(SecondForwardBackwardBase):
         conics, mus = self._compute_conics_mu(cov2d_3x3, eps)
         render_output = self._rasterize_torch(means2d, conics, opacities, mus, dim0, dim1)
         l2_loss = self._compute_l2_loss(render_output, target)
-        loss = lambda_l1 * l2_loss
+        loss = lambda_l2 * l2_loss
         
         if lambda_ssim > 0:
             from .loss import ssim
@@ -517,13 +517,13 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
     def __init__(
         self,
         eps: float = 0.3,
-        lambda_l1: float = 1.0,
+        lambda_l2: float = 1.0,
         lambda_ssim: float = 0.0,
         window_size: int = 11,
         tile_size: int = 16,
     ):
         self.eps = eps
-        self.lambda_l1 = lambda_l1
+        self.lambda_l2 = lambda_l2
         self.lambda_ssim = lambda_ssim
         self.window_size = window_size
         self.tile_size = tile_size
@@ -570,11 +570,11 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
             radii = data.get('radii')
         
         eps = config.get('eps', self.eps) if config else self.eps
-        lambda_l1 = config.get('lambda_l1', self.lambda_l1) if config else self.lambda_l1
+        lambda_l2 = get_lambda_l2(config, self.lambda_l2)
         lambda_ssim = config.get('lambda_ssim', self.lambda_ssim) if config else self.lambda_ssim
         window_size = config.get('window_size', self.window_size) if config else self.window_size
         
-        return cov2d_3x3, means2d, opacities, target, radii, eps, lambda_l1, lambda_ssim, window_size
+        return cov2d_3x3, means2d, opacities, target, radii, eps, lambda_l2, lambda_ssim, window_size
     
     def _compute_tile_intersections(
         self,
@@ -606,7 +606,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
         """Forward computation only."""
         from ..cuda._wrapper import conics_mu_fwd, rasterize_to_pixels_fwd, image_loss_fwd
         
-        cov2d_3x3, means2d, opacities, target, radii, eps, lambda_l1, lambda_ssim, window_size = \
+        cov2d_3x3, means2d, opacities, target, radii, eps, lambda_l2, lambda_ssim, window_size = \
             self._extract_params(params, data, config)
         
         C, dim0, dim1 = target.shape
@@ -632,7 +632,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
         # Step 4: Image loss
         result = image_loss_fwd(
             render_output, target, window_size,
-            lambda_l1, lambda_ssim,
+            lambda_l2, lambda_ssim,
             compute_statistics=False
         )
         loss = result[0]
@@ -658,7 +658,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
             image_loss_fwd, image_loss_bwd
         )
         
-        cov2d_3x3, means2d, opacities, target, radii, eps, lambda_l1, lambda_ssim, window_size = \
+        cov2d_3x3, means2d, opacities, target, radii, eps, lambda_l2, lambda_ssim, window_size = \
             self._extract_params(params, data, config)
         
         C, dim0, dim1 = target.shape
@@ -679,7 +679,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
         # Forward: Image loss with statistics
         result = image_loss_fwd(
             render_output, target, window_size,
-            lambda_l1, lambda_ssim,
+            lambda_l2, lambda_ssim,
             compute_statistics=True
         )
         loss = result[0]
@@ -692,7 +692,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
             render_output, target,
             mu_r, mu_m, f1, f2, f3, f4,
             grad_output, window_size,
-            lambda_l1, lambda_ssim
+            lambda_l2, lambda_ssim
         )
         
         # Backward: Rasterize
@@ -749,7 +749,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
             image_loss_fwd, image_loss_bwd, image_loss_bwd2
         )
         
-        cov2d_3x3, means2d, opacities, target, radii, eps, lambda_l1, lambda_ssim, window_size = \
+        cov2d_3x3, means2d, opacities, target, radii, eps, lambda_l2, lambda_ssim, window_size = \
             self._extract_params(params, data, config)
         
         C, dim0, dim1 = target.shape
@@ -770,7 +770,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
         # Forward: Image loss with statistics
         result = image_loss_fwd(
             render_output, target, window_size,
-            lambda_l1, lambda_ssim,
+            lambda_l2, lambda_ssim,
             compute_statistics=True
         )
         loss = result[0]
@@ -783,7 +783,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
             render_output, target,
             mu_r, mu_m, f1, f2, f3, f4,
             grad_output, window_size,
-            lambda_l1, lambda_ssim
+            lambda_l2, lambda_ssim
         )
         
         # Backward2: Image loss -> h_render_output (diagonal Hessian)
@@ -791,7 +791,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
             render_output, target,
             mu_r, mu_m, f1, f2, f3, f4,
             grad_output, window_size,
-            lambda_l1, lambda_ssim
+            lambda_l2, lambda_ssim
         )
         
         # Backward2: RasterizeToPixels -> 14 outputs
@@ -872,7 +872,7 @@ class GS2DRectifyingCUDA(SecondForwardBackwardBase):
 
 def create_gs2d_rectifying_autograd(
     eps: float = 0.3,
-    lambda_l1: float = 1.0,
+    lambda_l2: float = 1.0,
     lambda_ssim: float = 0.0,
     window_size: int = 11,
     tile_size: int = 16,
@@ -880,7 +880,7 @@ def create_gs2d_rectifying_autograd(
     """Create 2D Gaussian Splatting with ConicsMu operator (autograd version)."""
     return GS2DRectifyingAutograd(
         eps=eps,
-        lambda_l1=lambda_l1,
+        lambda_l2=lambda_l2,
         lambda_ssim=lambda_ssim,
         window_size=window_size,
         tile_size=tile_size,
@@ -889,7 +889,7 @@ def create_gs2d_rectifying_autograd(
 
 def create_gs2d_rectifying_cuda(
     eps: float = 0.3,
-    lambda_l1: float = 1.0,
+    lambda_l2: float = 1.0,
     lambda_ssim: float = 0.0,
     window_size: int = 11,
     tile_size: int = 16,
@@ -897,7 +897,7 @@ def create_gs2d_rectifying_cuda(
     """Create 2D Gaussian Splatting with ConicsMu operator (CUDA version)."""
     return GS2DRectifyingCUDA(
         eps=eps,
-        lambda_l1=lambda_l1,
+        lambda_l2=lambda_l2,
         lambda_ssim=lambda_ssim,
         window_size=window_size,
         tile_size=tile_size,

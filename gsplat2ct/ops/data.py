@@ -156,6 +156,22 @@ class Config:
             self.options[k] = v
 
 
+def get_lambda_l2(config: Optional[Config], default: float = 1.0) -> float:
+    """Weight for the L2 (MSE) image term: ``lambda_l2 * mean((pred - tgt)^2)``.
+
+    The legacy key ``lambda_l1`` is still read if ``lambda_l2`` is absent.
+    """
+    if config is None:
+        return default
+    v = config.get("lambda_l2")
+    if v is not None:
+        return float(v)
+    v = config.get("lambda_l1")
+    if v is not None:
+        return float(v)
+    return default
+
+
 # ============================================================================
 # 2. Output Data Structures
 # ============================================================================

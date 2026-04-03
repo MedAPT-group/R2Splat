@@ -2,7 +2,7 @@
 Test script for 2D Gaussian Splatting with Image Loss.
 
 This script validates the CUDA implementation against PyTorch autograd.
-When lambda_ssim=0 (L1 loss only), the results should match exactly.
+When lambda_ssim=0 (L2/MSE only), the results should match exactly.
 
 Test stages:
 1. Forward consistency: CUDA vs Torch render output and loss
@@ -104,13 +104,13 @@ def test_forward_consistency(
     target = generate_target_image(C, dim0, dim1, device, dtype)
     
     # Create operators (lambda_ssim=0 for exact comparison)
-    autograd_op = GS2DAutograd(lambda_l1=1.0, lambda_ssim=0.0)
-    cuda_op = GS2DCUDA(lambda_l1=1.0, lambda_ssim=0.0)
+    autograd_op = GS2DAutograd(lambda_l2=1.0, lambda_ssim=0.0)
+    cuda_op = GS2DCUDA(lambda_l2=1.0, lambda_ssim=0.0)
     
     # Create data structures
     params = GS2DParams(means2d=means2d, conics=conics, opacities=opacities, mus=mus)
     data = GS2DData(target=target, radii=radii)
-    config = GS2DConfig(lambda_l1=1.0, lambda_ssim=0.0)
+    config = GS2DConfig(lambda_l2=1.0, lambda_ssim=0.0)
     
     # Forward pass
     autograd_result = autograd_op.forward_only(params, data, config)
@@ -167,13 +167,13 @@ def test_backward1_consistency(
     target = generate_target_image(C, dim0, dim1, device, dtype)
     
     # Create operators
-    autograd_op = GS2DAutograd(lambda_l1=1.0, lambda_ssim=0.0)
-    cuda_op = GS2DCUDA(lambda_l1=1.0, lambda_ssim=0.0)
+    autograd_op = GS2DAutograd(lambda_l2=1.0, lambda_ssim=0.0)
+    cuda_op = GS2DCUDA(lambda_l2=1.0, lambda_ssim=0.0)
     
     # Create data structures
     params = GS2DParams(means2d=means2d, conics=conics, opacities=opacities, mus=mus)
     data = GS2DData(target=target, radii=radii)
-    config = GS2DConfig(lambda_l1=1.0, lambda_ssim=0.0)
+    config = GS2DConfig(lambda_l2=1.0, lambda_ssim=0.0)
     
     # Forward + backward
     _, autograd_grad = autograd_op.forward_backward1(params, data, config)
@@ -231,20 +231,20 @@ def test_backward2_consistency(
     target = generate_target_image(C, dim0, dim1, device, dtype)
     
     # Create operators
-    autograd_op = GS2DAutograd(lambda_l1=1.0, lambda_ssim=0.0)
-    cuda_op = GS2DCUDA(lambda_l1=1.0, lambda_ssim=0.0)
+    autograd_op = GS2DAutograd(lambda_l2=1.0, lambda_ssim=0.0)
+    cuda_op = GS2DCUDA(lambda_l2=1.0, lambda_ssim=0.0)
     
     # Create data structures
     params = GS2DParams(means2d=means2d, conics=conics, opacities=opacities, mus=mus)
     data = GS2DData(target=target, radii=radii)
-    config = GS2DConfig(lambda_l1=1.0, lambda_ssim=0.0)
+    config = GS2DConfig(lambda_l2=1.0, lambda_ssim=0.0)
     
     # Forward + backward1 + backward2
     _, autograd_grad, autograd_hess = autograd_op.forward_backward2(params, data, config)
     _, cuda_grad, cuda_hess = cuda_op.forward_backward2(params, data, config)
     
     print(f"Configuration: C={C}, N={N}, dim0={dim0}, dim1={dim1}")
-    print(f"Using lambda_l1=1.0, lambda_ssim=0.0 (L1 only, no SSIM)")
+    print(f"Using lambda_l2=1.0, lambda_ssim=0.0 (L2/MSE only, no SSIM)")
     
     def compare_tensors(name: str, t1: torch.Tensor, t2: torch.Tensor) -> bool:
         if t1 is None or t2 is None:
@@ -313,12 +313,12 @@ def test_loss_value(
     target = generate_target_image(C, dim0, dim1, device, dtype)
     
     # Create operator
-    cuda_op = GS2DCUDA(lambda_l1=1.0, lambda_ssim=0.0)
+    cuda_op = GS2DCUDA(lambda_l2=1.0, lambda_ssim=0.0)
     
     # Create data structures
     params = GS2DParams(means2d=means2d, conics=conics, opacities=opacities, mus=mus)
     data = GS2DData(target=target, radii=radii)
-    config = GS2DConfig(lambda_l1=1.0, lambda_ssim=0.0)
+    config = GS2DConfig(lambda_l2=1.0, lambda_ssim=0.0)
     
     # Forward
     result = cuda_op.forward_only(params, data, config)

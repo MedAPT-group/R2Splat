@@ -10,12 +10,12 @@ Usage::
 
 import os
 import random
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import hydra
 import numpy as np
 import torch
-import torch.utils.data
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
@@ -23,7 +23,7 @@ from tqdm import tqdm
 from gsplat2ct.data.ctproj import CTImageDataset, CTImageParser
 from gsplat2ct.model.gaussian_params import GaussianParams
 from gsplat2ct.ops.data import Params, Data, Config, ForwardResult, GradResult, HessResult
-from gsplat2ct.ops.gs3d_ct_train import GS3DCTTrainCUDA
+from gsplat2ct.ops.gs3d_ct_train import GS3DCTLossCUDA
 from gsplat2ct.optim.base import HessianMode, SignalStrategy
 from gsplat2ct.eval.evaluator import ProjectionEvaluator, VolumeEvaluator
 from gsplat2ct.vis.plotting import (
@@ -31,6 +31,7 @@ from gsplat2ct.vis.plotting import (
     save_volume_comparison,
     save_loss_curve,
 )
+from gsplat2ct.vis.video import ProjectionVideoRecorder, VideoVisConfig
 
 
 # =====================================================================
@@ -87,13 +88,21 @@ def make_train_config(
     img_h, img_w = img_shape
     vol_w, vol_d, vol_h = vol_dims
 
+    tr = cfg.trainer
+    if "lambda_l2" in tr:
+        lambda_l2 = float(tr.lambda_l2)
+    elif "lambda_l1" in tr:
+        lambda_l2 = float(tr.lambda_l1)
+    else:
+        lambda_l2 = 1.0
+
     config = Config()
     config.set(
         img_dim1=img_w,
         img_dim0=img_h,
         img_tile_size=cfg.trainer.img_tile_size,
         eps_blur=cfg.trainer.eps_blur,
-        lambda_l1=cfg.trainer.lambda_l1,
+        lambda_l2=lambda_l2,
         lambda_ssim=cfg.trainer.lambda_ssim,
         window_size=cfg.trainer.window_size,
         vol_dim2=vol_w,
@@ -106,6 +115,7 @@ def make_train_config(
         lambda_tv=cfg.trainer.lambda_tv,
         scale_min=cfg.model.scale_min,
         scale_max=cfg.model.scale_max,
+        image_loss_type=str(getattr(cfg.trainer, "image_loss_type", "l2")),
         absgrad=bool(getattr(cfg, "strategy", None) is not None and getattr(cfg.strategy, "absgrad", False)),
     )
     return config
@@ -197,28 +207,20 @@ def build_optimizer(cfg: DictConfig, params: Params):
 
 
 # =====================================================================
-# Dataloader helpers
-# =====================================================================
-
-def fetch_next_batch(
-    loader_iter: Iterator,
-    loader: torch.utils.data.DataLoader,
-) -> Tuple[Dict[str, torch.Tensor], Iterator]:
-    try:
-        batch = next(loader_iter)
-    except StopIteration:
-        loader_iter = iter(loader)
-        batch = next(loader_iter)
-    return batch, loader_iter
-
-
-# =====================================================================
 # Main training function
 # =====================================================================
 
 def train(cfg: DictConfig) -> None:
     device = torch.device(cfg.trainer.device if torch.cuda.is_available() else "cpu")
-    result_dir = cfg.exp.result_dir
+    # Always prepend a timestamp to output directory name.
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_result_dir = cfg.exp.result_dir
+    parent_dir = os.path.dirname(base_result_dir)
+    run_name = os.path.basename(base_result_dir.rstrip("/"))
+    if run_name == "":
+        run_name = "run"
+    result_dir = os.path.join(parent_dir, f"{timestamp}_{run_name}")
+    cfg.exp.result_dir = result_dir
     os.makedirs(result_dir, exist_ok=True)
 
     ckpt_dir = os.path.join(result_dir, "ckpts")
@@ -238,14 +240,9 @@ def train(cfg: DictConfig) -> None:
         testset = None
     evalset = testset if testset is not None else trainset
 
-    train_loader = torch.utils.data.DataLoader(
-        trainset,
-        batch_size=cfg.trainer.batch_size,
-        shuffle=True,
-        num_workers=cfg.trainer.num_workers,
-        pin_memory=cfg.trainer.pin_memory,
-        persistent_workers=(cfg.trainer.num_workers > 0 and cfg.trainer.persistent_workers),
-    )
+    trainset.preload_to(device)
+    if evalset is not trainset:
+        evalset.preload_to(device)
 
     # ---- Ground truth volume ----
     vol_gt: Optional[torch.Tensor] = None
@@ -282,7 +279,7 @@ def train(cfg: DictConfig) -> None:
 
     # ---- Operator ----
     print("[3/5] Creating operator...")
-    operator = GS3DCTTrainCUDA()
+    operator = GS3DCTLossCUDA()
     operator.initialize(params)
 
     # ---- Optimizer ----
@@ -299,11 +296,38 @@ def train(cfg: DictConfig) -> None:
     from gsplat2ct.strategy import DefaultStrategy
     strategy = DefaultStrategy(getattr(cfg, "strategy", None) or {})
 
+    # ---- Visualization manager ----
+    vis_cfg = getattr(cfg, "vis", None)
+    video_cfg_node = getattr(vis_cfg, "video", None)
+    video_vis_cfg = VideoVisConfig(
+        enabled=bool(getattr(video_cfg_node, "enabled", False)) if video_cfg_node is not None else False,
+        interval=int(getattr(video_cfg_node, "interval", 5)) if video_cfg_node is not None else 5,
+        view_index=int(getattr(video_cfg_node, "view_index", 0)) if video_cfg_node is not None else 0,
+        fps=int(getattr(video_cfg_node, "fps", 10)) if video_cfg_node is not None else 10,
+        value_min=float(getattr(video_cfg_node, "value_min", 0.0)) if video_cfg_node is not None else 0.0,
+        value_max=float(getattr(video_cfg_node, "value_max", 1.0)) if video_cfg_node is not None else 1.0,
+        frame_subdir=str(getattr(video_cfg_node, "frame_subdir", "video_frames")) if video_cfg_node is not None else "video_frames",
+        output_name=str(getattr(video_cfg_node, "output_name", "projection_progress.mp4")) if video_cfg_node is not None else "projection_progress.mp4",
+    )
+    video_recorder = ProjectionVideoRecorder(
+        vis_cfg=video_vis_cfg,
+        dataset=evalset,
+        device=device,
+        out_dir=vis_dir,
+        scale_min=cfg.model.scale_min,
+        scale_max=cfg.model.scale_max,
+        eps_blur=cfg.trainer.eps_blur,
+    )
+    video_recorder.set_params(params)
+
     # ---- Training loop ----
     print("[5/5] Starting training...")
     loss_history: Dict[str, List[float]] = {"total": [], "image": [], "tv": []}
-    train_iter = iter(train_loader)
     max_steps = cfg.trainer.max_steps
+    batch_size = int(cfg.trainer.batch_size)
+    num_views = len(trainset)
+    shuffle_perm = torch.randperm(num_views, device=device)
+    perm_cursor = 0
     progress = tqdm(range(max_steps), desc="Training")
 
     # Save baseline visualization right after initialization (step 0).
@@ -314,7 +338,18 @@ def train(cfg: DictConfig) -> None:
 
     for step in progress:
         scheduler.step(step, max_steps)
-        raw_batch, train_iter = fetch_next_batch(train_iter, train_loader)
+        if perm_cursor + batch_size <= num_views:
+            batch_indices = shuffle_perm[perm_cursor:perm_cursor + batch_size]
+            perm_cursor += batch_size
+        else:
+            remain = num_views - perm_cursor
+            head = shuffle_perm[perm_cursor:] if remain > 0 else torch.empty(0, dtype=torch.long, device=device)
+            shuffle_perm = torch.randperm(num_views, device=device)
+            take = batch_size - remain
+            tail = shuffle_perm[:take]
+            perm_cursor = take
+            batch_indices = torch.cat([head, tail], dim=0)
+        raw_batch = trainset.get_batch(batch_indices)
 
         # Image dimensions from the batch
         img_tensor = raw_batch["image"]
@@ -349,34 +384,51 @@ def train(cfg: DictConfig) -> None:
             fwd, grad = operator.forward_backward1(params, data_obj, op_config)
             optimizer.add_grad(grad)
 
-        # Strategy: densify/prune (topology changes reset optimizer moments)
+        # Strategy: gsplat-style grad2d/count accumulation + periodic refine
         topology_changed = False
-        if strategy.want_refine(step):
-            v_means2d = grad.get_aux("v_means2d")
-            v_means2d_abs = grad.get_aux("v_means2d_abs")
-            if v_means2d is not None:
-                out = strategy.decide(
-                    gp,
+        v_means2d = grad.get_aux("v_means2d")
+        v_means2d_abs = grad.get_aux("v_means2d_abs")
+        radii_2d = grad.get_aux("radii_2d")
+        n_cameras = int(raw_batch["camtoworld"].shape[0])
+        if strategy.should_accumulate_grad_stats(step):
+            if v_means2d is not None and radii_2d is not None:
+                strategy.accumulate_grad_stats(
+                    step=step,
                     v_means2d=v_means2d,
                     v_means2d_abs=v_means2d_abs,
-                    scale_min=cfg.model.scale_min,
-                    scale_max=cfg.model.scale_max,
+                    radii_2d=radii_2d,
+                    img_w=img_w,
+                    img_h=img_h,
+                    n_cameras=n_cameras,
                 )
-                changed = strategy.apply(
-                    gp,
-                    out,
-                    scale_min=cfg.model.scale_min,
-                    scale_max=cfg.model.scale_max,
-                )
-                if changed:
-                    params = gp.to_params()
-                    operator.initialize(params)
-                    optimizer.params = params
-                    optimizer.reset_moments()
-                    # Current step grads/hess were computed with the OLD topology.
-                    # Drop them and skip this step update to avoid shape mismatch.
-                    optimizer.zero_grad()
-                    topology_changed = True
+
+        if strategy.want_refine(step):
+            grow_scale3d_abs = None
+            if bbox is not None:
+                world_scale = (bbox[1] - bbox[0]).max().item()
+                grow_scale3d_abs = float(strategy.grow_scale3d) * float(world_scale)
+            out = strategy.decide(
+                gp,
+                scale_min=cfg.model.scale_min,
+                scale_max=cfg.model.scale_max,
+                grow_scale3d_abs=grow_scale3d_abs,
+            )
+            changed = strategy.apply(
+                gp,
+                out,
+                scale_min=cfg.model.scale_min,
+                scale_max=cfg.model.scale_max,
+                step=step,
+            )
+            strategy.reset_grad_accumulator()
+            if changed:
+                params = gp.to_params()
+                operator.initialize(params)
+                optimizer.params = params
+                optimizer.reset_moments()
+                video_recorder.set_params(params)
+                optimizer.zero_grad()
+                topology_changed = True
 
         if not topology_changed:
             optimizer.step()
@@ -397,6 +449,8 @@ def train(cfg: DictConfig) -> None:
             N=gp.num_gaussians,
         )
 
+        video_recorder.maybe_record_step(step)
+
         # Periodic evaluation
         if step > 0 and step % cfg.trainer.eval_interval == 0:
             _run_eval(
@@ -413,7 +467,11 @@ def train(cfg: DictConfig) -> None:
     # Final save
     gp.update_from_params(params)
     gp.save(os.path.join(ckpt_dir, "ckpt_final.pt"), step=max_steps - 1)
-    save_loss_curve(loss_history, os.path.join(vis_dir, "loss_curve.png"))
+    if bool(getattr(vis_cfg, "save_loss_curve", False)):
+        save_loss_curve(loss_history, os.path.join(vis_dir, "loss_curve.png"))
+    video_path = video_recorder.finalize()
+    if video_path is not None:
+        print(f"   [VideoVis] Saved mp4: {video_path}")
     print(f"\nTraining complete. Results in: {result_dir}")
 
 
@@ -449,11 +507,13 @@ def _run_eval(
     )
 
     if vis_pairs:
-        save_projection_comparison(
-            vis_pairs,
-            os.path.join(vis_dir, f"proj_step_{step}.png"),
-            step=step,
-        )
+        vis_cfg = getattr(cfg, "vis", None)
+        if bool(getattr(vis_cfg, "save_projection_comparison", False)):
+            save_projection_comparison(
+                vis_pairs,
+                os.path.join(vis_dir, f"proj_step_{step}.png"),
+                step=step,
+            )
 
     if vol_gt is not None and bbox is not None and volume_shape_wdh is not None:
         vol_eval = VolumeEvaluator(
@@ -470,11 +530,13 @@ def _run_eval(
             f"Vol PSNR={vol_metrics['psnr']:.2f} dB, "
             f"Vol SSIM={vol_metrics['ssim']:.4f}"
         )
-        save_volume_comparison(
-            pred_vol, vol_gt,
-            os.path.join(vis_dir, f"vol_step_{step}.png"),
-            psnr_val=vol_metrics["psnr"],
-        )
+        vis_cfg = getattr(cfg, "vis", None)
+        if bool(getattr(vis_cfg, "save_volume_comparison", False)):
+            save_volume_comparison(
+                pred_vol, vol_gt,
+                os.path.join(vis_dir, f"vol_step_{step}.png"),
+                psnr_val=vol_metrics["psnr"],
+            )
 
 
 # =====================================================================

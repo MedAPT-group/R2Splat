@@ -1,0 +1,24 @@
+# R2Gaussian-like first-order optimizer settings.
+use_second_order: false
+
+# Per-parameter initial learning rates (mapped from R2Gaussian names):
+# position -> means, rotation -> quats, scaling -> scale_ori, density -> opacity
+lr_means: 0.0002
+lr_quats: 0.001
+lr_scale_ori: 0.005
+lr_opacity: 0.00005
+
+# Adam hyper-parameters
+beta1: 0.9
+beta2: 0.999
+eps: 1.0e-8
+
+# Second-order fields kept for schema completeness (unused here).
+hess_mode: "DIAGONAL"
+grad_strategy: "RAW"
+hess_strategy: "RAW"
+damping_means: 1.0e-3
+damping_quats: 1.0e-3
+damping_scale_ori: 1.0e-3
+damping_opacity: 1.0e-3
+

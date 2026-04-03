@@ -15,7 +15,6 @@ from typing import Optional, Tuple
 import hydra
 import numpy as np
 import torch
-import torch.utils.data
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig
 from tqdm import tqdm
@@ -49,13 +48,14 @@ def _evaluate_projections(
     op = GS3DCTRasterizeCUDA()
     op.initialize(params)
 
-    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
+    dataset.preload_to(device)
     psnr_list, ssim_list = [], []
 
-    for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split_name}")):
-        c2w = batch["camtoworld"].to(device).contiguous()
-        K = batch["K"].to(device).contiguous()
-        gt = batch["image"].to(device).contiguous()
+    for idx in tqdm(range(len(dataset)), desc=f"Evaluating {split_name}"):
+        batch = dataset.get_batch(idx)
+        c2w = batch["camtoworld"].contiguous()
+        K = batch["K"].contiguous()
+        gt = batch["image"].contiguous()
 
         viewmats = torch.linalg.inv(c2w).contiguous()
         C = viewmats.shape[0]

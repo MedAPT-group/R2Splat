@@ -2,7 +2,7 @@
 GS3DCT-specific optimizers for 3DGS-based CT reconstruction.
 
 Provides concrete Adam and Newton optimizers that understand the Hessian
-formats produced by ``GS3DCTTrainCUDA.forward_backward2``.
+formats produced by ``GS3DCTLossCUDA.forward_backward2``.
 
 Parameter groups and their Hessian formats:
     means:     grad (N,3),  self-hess (N,6)  upper-tri 3×3

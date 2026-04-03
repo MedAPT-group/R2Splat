@@ -65,6 +65,12 @@ _mlp_classification_bwd2 = _make_lazy_cuda_func("mlp_classification_bwd2")
 _image_loss_fwd = _make_lazy_cuda_func("image_loss_fwd")
 _image_loss_bwd = _make_lazy_cuda_func("image_loss_bwd")
 _image_loss_bwd2 = _make_lazy_cuda_func("image_loss_bwd2")
+_image_loss_l2_fwd = _make_lazy_cuda_func("image_loss_l2_fwd")
+_image_loss_l2_bwd = _make_lazy_cuda_func("image_loss_l2_bwd")
+_image_loss_l2_bwd2 = _make_lazy_cuda_func("image_loss_l2_bwd2")
+_image_loss_l1_fwd = _make_lazy_cuda_func("image_loss_l1_fwd")
+_image_loss_l1_bwd = _make_lazy_cuda_func("image_loss_l1_bwd")
+_image_loss_l1_bwd2 = _make_lazy_cuda_func("image_loss_l1_bwd2")
 
 # L2 Loss
 _l2_loss_fwd = _make_lazy_cuda_func("l2_loss_fwd")
@@ -340,6 +346,122 @@ def image_loss_bwd2(
         mu_r, mu_m, f1, f2, f3, f4,
         grad_output, window_size,
         lambda_l2, lambda_ssim
+    )
+
+
+def image_loss_l2_fwd(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.2,
+    compute_statistics: bool = True,
+) -> Dict[str, torch.Tensor]:
+    return _image_loss_l2_fwd(
+        prediction, target, window_size,
+        lambda_l2, lambda_ssim, compute_statistics
+    )
+
+
+def image_loss_l2_bwd(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mu_r: torch.Tensor,
+    mu_m: torch.Tensor,
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    f3: torch.Tensor,
+    f4: torch.Tensor,
+    grad_output: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.2,
+) -> torch.Tensor:
+    return _image_loss_l2_bwd(
+        prediction, target,
+        mu_r, mu_m, f1, f2, f3, f4,
+        grad_output, window_size,
+        lambda_l2, lambda_ssim
+    )
+
+
+def image_loss_l2_bwd2(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mu_r: torch.Tensor,
+    mu_m: torch.Tensor,
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    f3: torch.Tensor,
+    f4: torch.Tensor,
+    grad_output: torch.Tensor,
+    window_size: int = 11,
+    lambda_l2: float = 1.0,
+    lambda_ssim: float = 0.2,
+) -> torch.Tensor:
+    return _image_loss_l2_bwd2(
+        prediction, target,
+        mu_r, mu_m, f1, f2, f3, f4,
+        grad_output, window_size,
+        lambda_l2, lambda_ssim
+    )
+
+
+def image_loss_l1_fwd(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    window_size: int = 11,
+    lambda_l1: float = 1.0,
+    lambda_ssim: float = 0.2,
+    compute_statistics: bool = True,
+) -> Dict[str, torch.Tensor]:
+    return _image_loss_l1_fwd(
+        prediction, target, window_size,
+        lambda_l1, lambda_ssim, compute_statistics
+    )
+
+
+def image_loss_l1_bwd(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mu_r: torch.Tensor,
+    mu_m: torch.Tensor,
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    f3: torch.Tensor,
+    f4: torch.Tensor,
+    grad_output: torch.Tensor,
+    window_size: int = 11,
+    lambda_l1: float = 1.0,
+    lambda_ssim: float = 0.2,
+) -> torch.Tensor:
+    return _image_loss_l1_bwd(
+        prediction, target,
+        mu_r, mu_m, f1, f2, f3, f4,
+        grad_output, window_size,
+        lambda_l1, lambda_ssim
+    )
+
+
+def image_loss_l1_bwd2(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mu_r: torch.Tensor,
+    mu_m: torch.Tensor,
+    f1: torch.Tensor,
+    f2: torch.Tensor,
+    f3: torch.Tensor,
+    f4: torch.Tensor,
+    grad_output: torch.Tensor,
+    window_size: int = 11,
+    lambda_l1: float = 1.0,
+    lambda_ssim: float = 0.2,
+) -> torch.Tensor:
+    return _image_loss_l1_bwd2(
+        prediction, target,
+        mu_r, mu_m, f1, f2, f3, f4,
+        grad_output, window_size,
+        lambda_l1, lambda_ssim
     )
 
 
@@ -1550,6 +1672,12 @@ __all__ = [
     "image_loss_fwd",
     "image_loss_bwd",
     "image_loss_bwd2",
+    "image_loss_l2_fwd",
+    "image_loss_l2_bwd",
+    "image_loss_l2_bwd2",
+    "image_loss_l1_fwd",
+    "image_loss_l1_bwd",
+    "image_loss_l1_bwd2",
     # L2 Loss
     "l2_loss_fwd",
     "l2_loss_bwd",

@@ -1,0 +1,17 @@
+# Visualization configuration branch (all disabled by default).
+
+# Existing image visualizations saved at eval time.
+save_projection_comparison: true
+save_volume_comparison: true
+save_loss_curve: true
+
+# Fixed-view training video visualization.
+video:
+  enabled: true
+  interval: 25
+  view_index: 0
+  fps: 50
+  value_min: 0.0
+  value_max: 1.0
+  frame_subdir: "video_frames"
+  output_name: "projection_progress.mp4"

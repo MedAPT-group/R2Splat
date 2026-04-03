@@ -161,13 +161,13 @@ def test_forward_consistency(
     )
     
     # Create operators (lambda_ssim=0 for exact comparison)
-    autograd_op = GS2DRectifyingAutograd(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
-    cuda_op = GS2DRectifyingCUDA(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    autograd_op = GS2DRectifyingAutograd(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
+    cuda_op = GS2DRectifyingCUDA(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     # Create data structures
     params = GS2DRectifyingParams(cov2d_3x3=cov2d_3x3, means2d=means2d, opacities=opacities)
     data = GS2DRectifyingData(target=target, radii=radii)
-    config = GS2DRectifyingConfig(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    config = GS2DRectifyingConfig(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     # Forward pass
     autograd_result = autograd_op.forward_only(params, data, config)
@@ -224,13 +224,13 @@ def test_backward1_consistency(
     )
     
     # Create operators
-    autograd_op = GS2DRectifyingAutograd(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
-    cuda_op = GS2DRectifyingCUDA(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    autograd_op = GS2DRectifyingAutograd(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
+    cuda_op = GS2DRectifyingCUDA(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     # Create data structures
     params = GS2DRectifyingParams(cov2d_3x3=cov2d_3x3, means2d=means2d, opacities=opacities)
     data = GS2DRectifyingData(target=target, radii=radii)
-    config = GS2DRectifyingConfig(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    config = GS2DRectifyingConfig(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     # Forward + backward
     _, autograd_grad = autograd_op.forward_backward1(params, data, config)
@@ -287,20 +287,20 @@ def test_backward2_consistency(
     )
     
     # Create operators
-    autograd_op = GS2DRectifyingAutograd(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
-    cuda_op = GS2DRectifyingCUDA(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    autograd_op = GS2DRectifyingAutograd(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
+    cuda_op = GS2DRectifyingCUDA(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     # Create data structures
     params = GS2DRectifyingParams(cov2d_3x3=cov2d_3x3, means2d=means2d, opacities=opacities)
     data = GS2DRectifyingData(target=target, radii=radii)
-    config = GS2DRectifyingConfig(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    config = GS2DRectifyingConfig(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     # Forward + backward1 + backward2
     _, autograd_grad, autograd_hess = autograd_op.forward_backward2(params, data, config)
     _, cuda_grad, cuda_hess = cuda_op.forward_backward2(params, data, config)
     
     print(f"Configuration: C={C}, N={N}, dim0={dim0}, dim1={dim1}, eps={eps}")
-    print(f"Using lambda_l1=1.0, lambda_ssim=0.0 (L2 loss only)")
+    print(f"Using lambda_l2=1.0, lambda_ssim=0.0 (L2 loss only)")
     
     def compare_tensors(name: str, t1: torch.Tensor, t2: torch.Tensor) -> bool:
         if t1 is None or t2 is None:
@@ -374,12 +374,12 @@ def test_loss_value_sanity(
     )
     
     # Create operator
-    cuda_op = GS2DRectifyingCUDA(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    cuda_op = GS2DRectifyingCUDA(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     # Create data structures
     params = GS2DRectifyingParams(cov2d_3x3=cov2d_3x3, means2d=means2d, opacities=opacities)
     data = GS2DRectifyingData(target=target, radii=radii)
-    config = GS2DRectifyingConfig(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    config = GS2DRectifyingConfig(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     # Forward
     result = cuda_op.forward_only(params, data, config)
@@ -429,7 +429,7 @@ def test_gradient_finite_difference(
         C, N, dim0, dim1, device, dtype, eps, seed=99
     )
     
-    autograd_op = GS2DRectifyingAutograd(eps=eps, lambda_l1=1.0, lambda_ssim=0.0)
+    autograd_op = GS2DRectifyingAutograd(eps=eps, lambda_l2=1.0, lambda_ssim=0.0)
     
     def compute_loss(cov_in, mean_in, opa_in):
         conics, mus = autograd_op._compute_conics_mu(cov_in, eps)

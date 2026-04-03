@@ -22,7 +22,7 @@
 namespace gsplat2ct {
 
 // ============================================================================
-// L2 Gradient Kernel
+// L2/L1 Gradient Kernels
 // ============================================================================
 
 template <typename S>
@@ -43,6 +43,24 @@ __global__ void compute_l2_grad_kernel(
     
     // d((x-t)^2)/dx = 2*(x-t)
     S grad = grad_output[0] * lambda_l2 * static_cast<S>(2) * diff / static_cast<S>(total_elements);
+    grad_pred[idx] += grad;
+}
+
+template <typename S>
+__global__ void compute_l1_grad_kernel(
+    const S* __restrict__ prediction,
+    const S* __restrict__ target,
+    const S* __restrict__ grad_output,
+    S* __restrict__ grad_pred,
+    S lambda_l1,
+    int total_elements
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_elements) return;
+    S diff = prediction[idx] - target[idx];
+    S sign = (diff > static_cast<S>(0)) ? static_cast<S>(1) :
+             ((diff < static_cast<S>(0)) ? static_cast<S>(-1) : static_cast<S>(0));
+    S grad = grad_output[0] * lambda_l1 * sign / static_cast<S>(total_elements);
     grad_pred[idx] += grad;
 }
 
@@ -345,7 +363,7 @@ __global__ void compute_l2_hessian_kernel(
 // ============================================================================
 
 template <typename S>
-void launch_image_loss_bwd(
+void launch_image_loss_l2_bwd(
     const S* __restrict__ prediction,
     const S* __restrict__ target,
     const S* __restrict__ gaussian_window,
@@ -389,7 +407,7 @@ void launch_image_loss_bwd(
 }
 
 template <typename S>
-void launch_image_loss_bwd2(
+void launch_image_loss_l2_bwd2(
     const S* __restrict__ prediction,
     const S* __restrict__ target,
     const S* __restrict__ gaussian_window,
@@ -433,25 +451,127 @@ void launch_image_loss_bwd2(
 }
 
 // Explicit template instantiations
-template void launch_image_loss_bwd<float>(
+template void launch_image_loss_l2_bwd<float>(
     const float*, const float*, const float*,
     const float*, const float*, const float*, const float*, const float*, const float*,
     const float*, float*, int, int, int, int, float, float, float, float, cudaStream_t
 );
 
-template void launch_image_loss_bwd<double>(
+template void launch_image_loss_l2_bwd<double>(
     const double*, const double*, const double*,
     const double*, const double*, const double*, const double*, const double*, const double*,
     const double*, double*, int, int, int, int, double, double, double, double, cudaStream_t
 );
 
-template void launch_image_loss_bwd2<float>(
+template void launch_image_loss_l2_bwd2<float>(
     const float*, const float*, const float*,
     const float*, const float*, const float*, const float*, const float*, const float*,
     const float*, float*, int, int, int, int, float, float, float, float, cudaStream_t
 );
 
-template void launch_image_loss_bwd2<double>(
+template void launch_image_loss_l2_bwd2<double>(
+    const double*, const double*, const double*,
+    const double*, const double*, const double*, const double*, const double*, const double*,
+    const double*, double*, int, int, int, int, double, double, double, double, cudaStream_t
+);
+
+template <typename S>
+void launch_image_loss_l1_bwd(
+    const S* __restrict__ prediction,
+    const S* __restrict__ target,
+    const S* __restrict__ gaussian_window,
+    const S* __restrict__ mu_r,
+    const S* __restrict__ mu_m,
+    const S* __restrict__ f1,
+    const S* __restrict__ f2,
+    const S* __restrict__ f3,
+    const S* __restrict__ f4,
+    const S* __restrict__ grad_output,
+    S* __restrict__ grad_pred,
+    int B, int H, int W,
+    int window_size,
+    S lambda_l1,
+    S lambda_ssim,
+    S C1, S C2,
+    cudaStream_t stream
+) {
+    int total_pixels = B * H * W;
+    int threads = GSPLAT2CT_N_THREADS;
+    int blocks = (total_pixels + threads - 1) / threads;
+
+    cudaMemsetAsync(grad_pred, 0, total_pixels * sizeof(S), stream);
+
+    compute_l1_grad_kernel<S><<<blocks, threads, 0, stream>>>(
+        prediction, target, grad_output, grad_pred, lambda_l1, total_pixels
+    );
+
+    if (window_size <= 32) {
+        compute_ssim_grad_pixel_parallel_kernel<S, 32><<<blocks, threads, 0, stream>>>(
+            prediction, target, gaussian_window,
+            mu_r, mu_m, f1, f2, f3, f4,
+            grad_output, grad_pred,
+            B, H, W, window_size,
+            lambda_ssim, C1, C2
+        );
+    }
+}
+
+template <typename S>
+void launch_image_loss_l1_bwd2(
+    const S* __restrict__ prediction,
+    const S* __restrict__ target,
+    const S* __restrict__ gaussian_window,
+    const S* __restrict__ mu_r,
+    const S* __restrict__ mu_m,
+    const S* __restrict__ f1,
+    const S* __restrict__ f2,
+    const S* __restrict__ f3,
+    const S* __restrict__ f4,
+    const S* __restrict__ grad_output,
+    S* __restrict__ hessian_diag,
+    int B, int H, int W,
+    int window_size,
+    S lambda_l1,
+    S lambda_ssim,
+    S C1, S C2,
+    cudaStream_t stream
+) {
+    int total_pixels = B * H * W;
+    int threads = GSPLAT2CT_N_THREADS;
+    int blocks = (total_pixels + threads - 1) / threads;
+
+    cudaMemsetAsync(hessian_diag, 0, total_pixels * sizeof(S), stream);
+
+    if (window_size <= 32) {
+        compute_ssim_hessian_kernel<S, 32><<<blocks, threads, 0, stream>>>(
+            prediction, target, gaussian_window,
+            mu_r, mu_m, f1, f2, f3, f4,
+            grad_output, hessian_diag,
+            B, H, W, window_size,
+            lambda_ssim, C1, C2
+        );
+    }
+}
+
+template void launch_image_loss_l1_bwd<float>(
+    const float*, const float*, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, float*, int, int, int, int, float, float, float, float, cudaStream_t
+);
+
+template void launch_image_loss_l1_bwd<double>(
+    const double*, const double*, const double*,
+    const double*, const double*, const double*, const double*, const double*, const double*,
+    const double*, double*, int, int, int, int, double, double, double, double, cudaStream_t
+);
+
+template void launch_image_loss_l1_bwd2<float>(
+    const float*, const float*, const float*,
+    const float*, const float*, const float*, const float*, const float*, const float*,
+    const float*, float*, int, int, int, int, float, float, float, float, cudaStream_t
+);
+
+template void launch_image_loss_l1_bwd2<double>(
     const double*, const double*, const double*,
     const double*, const double*, const double*, const double*, const double*, const double*,
     const double*, double*, int, int, int, int, double, double, double, double, cudaStream_t

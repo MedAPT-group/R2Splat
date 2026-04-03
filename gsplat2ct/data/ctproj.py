@@ -3,7 +3,7 @@
 Reads the ``meta_data.json`` file format shared with r2splat projects.  The
 dataset returns per-view camera parameters and ground-truth projection images
 that can be converted into the ``Data`` / ``Config`` containers expected by
-``GS3DCTTrainCUDA``.
+``GS3DCTLossCUDA``.
 
 Dataset directory layout::
 
@@ -17,7 +17,7 @@ Dataset directory layout::
 
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -96,6 +96,10 @@ class CTImageDataset(torch.utils.data.Dataset):
             self.camtoworlds.append(self._get_camtoworld(angle))
 
         self.K = self._get_K()
+        self._images_tensor: Optional[torch.Tensor] = None
+        self._camtoworlds_tensor: Optional[torch.Tensor] = None
+        self._K_tensor: Optional[torch.Tensor] = None
+        self._preload_device: Optional[torch.device] = None
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -120,6 +124,40 @@ class CTImageDataset(torch.utils.data.Dataset):
 
     def get_bbox(self) -> Optional[List[List[float]]]:
         return self.parser.get_bbox()
+
+    def preload_to(self, device: Union[str, torch.device]) -> None:
+        """Preload all per-view tensors onto a target device."""
+        dev = torch.device(device)
+        if self._preload_device == dev:
+            return
+        self._images_tensor = torch.stack(self.images, dim=0).to(dev).contiguous()
+        self._camtoworlds_tensor = torch.stack(self.camtoworlds, dim=0).to(dev).contiguous()
+        self._K_tensor = self.K.to(dev).contiguous()
+        self._preload_device = dev
+
+    def get_batch(self, indices: Union[int, List[int], torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Fetch a batched sample dict from preloaded tensors."""
+        if self._images_tensor is None or self._camtoworlds_tensor is None or self._K_tensor is None:
+            raise RuntimeError("Dataset is not preloaded. Call preload_to(device) first.")
+
+        if isinstance(indices, int):
+            idx = torch.tensor([indices], device=self._images_tensor.device, dtype=torch.long)
+        elif isinstance(indices, list):
+            idx = torch.tensor(indices, device=self._images_tensor.device, dtype=torch.long)
+        elif isinstance(indices, torch.Tensor):
+            idx = indices.to(self._images_tensor.device, dtype=torch.long).reshape(-1)
+        else:
+            raise TypeError(f"Unsupported indices type: {type(indices)}")
+
+        c2w = self._camtoworlds_tensor.index_select(0, idx).contiguous()
+        image = self._images_tensor.index_select(0, idx).contiguous()
+        K = self._K_tensor.unsqueeze(0).expand(idx.shape[0], -1, -1).contiguous()
+        return {
+            "K": K,
+            "camtoworld": c2w,
+            "image": image,
+            "image_id": idx,
+        }
 
     # ------------------------------------------------------------------
     # Camera geometry

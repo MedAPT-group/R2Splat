@@ -9,7 +9,7 @@ This module provides end-to-end implementations for 2D Gaussian Splatting:
 The pipeline is:
     2D Gaussian Parameters (means2d, conics, opacities, mus)
         -> Rasterization -> Rendered Image
-        -> Image Loss (L1 + SSIM) -> Scalar Loss
+        -> Image Loss (L2 / MSE + SSIM) -> Scalar Loss
 
 For second-order optimization:
     Loss -> v_image (first derivative) + h_image (second derivative)
@@ -19,7 +19,7 @@ For second-order optimization:
 Note on SSIM:
     - SSIM introduces cross-pixel dependencies in the Hessian
     - Our CUDA implementation uses diagonal approximation (ignoring cross-pixel terms)
-    - When lambda_ssim=0 (L1 only), CUDA and torch autograd should match exactly
+    - When lambda_ssim=0 (L2/MSE only), CUDA and torch autograd should match exactly
 
 Author: Dy164
 Date: 2026-01-30
@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Tuple
 
 from .base import SecondForwardBackwardBase
-from .data import Params, Data, Config, ForwardResult, GradResult, HessResult
+from .data import Params, Data, Config, ForwardResult, GradResult, HessResult, get_lambda_l2
 
 
 # ============================================================================
@@ -89,19 +89,19 @@ class GS2DConfig(Config):
     
     Attributes:
         tile_size: Size of each tile in pixels (default 16)
-        lambda_l1: Weight for L1 loss (default 1.0)
+        lambda_l2: Weight for L2 (MSE) loss (default 1.0)
         lambda_ssim: Weight for SSIM loss (default 0.0 for testing)
         window_size: SSIM window size (default 11)
     """
     tile_size: int = 16
-    lambda_l1: float = 1.0
+    lambda_l2: float = 1.0
     lambda_ssim: float = 0.0  # Default 0 for exact comparison with torch
     window_size: int = 11
     
     def __post_init__(self):
         """Sync named fields to options."""
         self.options['tile_size'] = self.tile_size
-        self.options['lambda_l1'] = self.lambda_l1
+        self.options['lambda_l2'] = self.lambda_l2
         self.options['lambda_ssim'] = self.lambda_ssim
         self.options['window_size'] = self.window_size
 
@@ -120,17 +120,17 @@ class GS2DAutograd(SecondForwardBackwardBase):
     - Second-order Hessians (autograd)
     
     Use this for testing and validation against the CUDA implementation.
-    Note: Only accurate when lambda_ssim=0 (L1 loss only).
+    Note: Only accurate when lambda_ssim=0 (L2/MSE only).
     """
     
     def __init__(
         self,
-        lambda_l1: float = 1.0,
+        lambda_l2: float = 1.0,
         lambda_ssim: float = 0.0,
         window_size: int = 11,
         tile_size: int = 16,
     ):
-        self.lambda_l1 = lambda_l1
+        self.lambda_l2 = lambda_l2
         self.lambda_ssim = lambda_ssim
         self.window_size = window_size
         self.tile_size = tile_size
@@ -208,7 +208,7 @@ class GS2DAutograd(SecondForwardBackwardBase):
         
         return render_output
     
-    def _compute_l1_loss(
+    def _compute_l2_loss(
         self,
         prediction: torch.Tensor,
         target: torch.Tensor,
@@ -244,7 +244,7 @@ class GS2DAutograd(SecondForwardBackwardBase):
             target = data.get('target')
         
         # Get config
-        lambda_l1 = config.get('lambda_l1', self.lambda_l1) if config else self.lambda_l1
+        lambda_l2 = get_lambda_l2(config, self.lambda_l2)
         lambda_ssim = config.get('lambda_ssim', self.lambda_ssim) if config else self.lambda_ssim
         
         C, dim0, dim1 = target.shape
@@ -253,8 +253,8 @@ class GS2DAutograd(SecondForwardBackwardBase):
         render_output = self._rasterize_torch(means2d, conics, opacities, mus, dim0, dim1)
         
         # Compute loss
-        l1_loss = self._compute_l1_loss(render_output, target)
-        loss = lambda_l1 * l1_loss
+        l2_loss = self._compute_l2_loss(render_output, target)
+        loss = lambda_l2 * l2_loss
         
         if lambda_ssim > 0:
             from .loss import ssim
@@ -295,7 +295,7 @@ class GS2DAutograd(SecondForwardBackwardBase):
             target = data.get('target')
         
         # Get config
-        lambda_l1 = config.get('lambda_l1', self.lambda_l1) if config else self.lambda_l1
+        lambda_l2 = get_lambda_l2(config, self.lambda_l2)
         lambda_ssim = config.get('lambda_ssim', self.lambda_ssim) if config else self.lambda_ssim
         
         C, dim0, dim1 = target.shape
@@ -304,8 +304,8 @@ class GS2DAutograd(SecondForwardBackwardBase):
         render_output = self._rasterize_torch(means2d, conics, opacities, mus, dim0, dim1)
         
         # Compute loss
-        l1_loss = self._compute_l1_loss(render_output, target)
-        loss = lambda_l1 * l1_loss
+        l2_loss = self._compute_l2_loss(render_output, target)
+        loss = lambda_l2 * l2_loss
         
         if lambda_ssim > 0:
             from .loss import ssim
@@ -357,7 +357,7 @@ class GS2DAutograd(SecondForwardBackwardBase):
             target = data.get('target')
         
         # Get config
-        lambda_l1 = config.get('lambda_l1', self.lambda_l1) if config else self.lambda_l1
+        lambda_l2 = get_lambda_l2(config, self.lambda_l2)
         lambda_ssim = config.get('lambda_ssim', self.lambda_ssim) if config else self.lambda_ssim
         
         C, dim0, dim1 = target.shape
@@ -369,8 +369,8 @@ class GS2DAutograd(SecondForwardBackwardBase):
         render_output = self._rasterize_torch(means2d, conics, opacities, mus, dim0, dim1)
         
         # Compute loss
-        l1_loss = self._compute_l1_loss(render_output, target)
-        loss = lambda_l1 * l1_loss
+        l2_loss = self._compute_l2_loss(render_output, target)
+        loss = lambda_l2 * l2_loss
         
         if lambda_ssim > 0:
             from .loss import ssim
@@ -589,12 +589,12 @@ class GS2DCUDA(SecondForwardBackwardBase):
     
     def __init__(
         self,
-        lambda_l1: float = 1.0,
+        lambda_l2: float = 1.0,
         lambda_ssim: float = 0.0,
         window_size: int = 11,
         tile_size: int = 16,
     ):
-        self.lambda_l1 = lambda_l1
+        self.lambda_l2 = lambda_l2
         self.lambda_ssim = lambda_ssim
         self.window_size = window_size
         self.tile_size = tile_size
@@ -672,7 +672,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
             radii = data.get('radii')
         
         # Get config
-        lambda_l1 = config.get('lambda_l1', self.lambda_l1) if config else self.lambda_l1
+        lambda_l2 = get_lambda_l2(config, self.lambda_l2)
         lambda_ssim = config.get('lambda_ssim', self.lambda_ssim) if config else self.lambda_ssim
         window_size = config.get('window_size', self.window_size) if config else self.window_size
         
@@ -696,7 +696,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
         # Compute image loss
         result = image_loss_fwd(
             render_output, target, window_size,
-            lambda_l1, lambda_ssim,
+            lambda_l2, lambda_ssim,
             compute_statistics=False
         )
         loss = result[0]
@@ -742,7 +742,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
             radii = data.get('radii')
         
         # Get config
-        lambda_l1 = config.get('lambda_l1', self.lambda_l1) if config else self.lambda_l1
+        lambda_l2 = get_lambda_l2(config, self.lambda_l2)
         lambda_ssim = config.get('lambda_ssim', self.lambda_ssim) if config else self.lambda_ssim
         window_size = config.get('window_size', self.window_size) if config else self.window_size
         
@@ -766,7 +766,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
         # Forward: Image loss with statistics
         result = image_loss_fwd(
             render_output, target, window_size,
-            lambda_l1, lambda_ssim,
+            lambda_l2, lambda_ssim,
             compute_statistics=True
         )
         loss = result[0]
@@ -780,7 +780,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
             self._mu_r, self._mu_m,
             self._f1, self._f2, self._f3, self._f4,
             grad_output, window_size,
-            lambda_l1, lambda_ssim
+            lambda_l2, lambda_ssim
         )
         
         # Backward: Rasterize
@@ -841,7 +841,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
             radii = data.get('radii')
         
         # Get config
-        lambda_l1 = config.get('lambda_l1', self.lambda_l1) if config else self.lambda_l1
+        lambda_l2 = get_lambda_l2(config, self.lambda_l2)
         lambda_ssim = config.get('lambda_ssim', self.lambda_ssim) if config else self.lambda_ssim
         window_size = config.get('window_size', self.window_size) if config else self.window_size
         
@@ -865,7 +865,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
         # Forward: Image loss with statistics
         result = image_loss_fwd(
             render_output, target, window_size,
-            lambda_l1, lambda_ssim,
+            lambda_l2, lambda_ssim,
             compute_statistics=True
         )
         loss = result[0]
@@ -879,7 +879,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
             self._mu_r, self._mu_m,
             self._f1, self._f2, self._f3, self._f4,
             grad_output, window_size,
-            lambda_l1, lambda_ssim
+            lambda_l2, lambda_ssim
         )
         
         # Backward2: Image loss -> h_render_output (diagonal Hessian)
@@ -888,7 +888,7 @@ class GS2DCUDA(SecondForwardBackwardBase):
             self._mu_r, self._mu_m,
             self._f1, self._f2, self._f3, self._f4,
             grad_output, window_size,
-            lambda_l1, lambda_ssim
+            lambda_l2, lambda_ssim
         )
         
         # Backward2: Rasterize with both v and h
@@ -950,14 +950,14 @@ class GS2DCUDA(SecondForwardBackwardBase):
 # ============================================================================
 
 def create_gs2d_autograd(
-    lambda_l1: float = 1.0,
+    lambda_l2: float = 1.0,
     lambda_ssim: float = 0.0,
     window_size: int = 11,
     tile_size: int = 16,
 ) -> GS2DAutograd:
     """Create 2D Gaussian Splatting operator (autograd version)."""
     return GS2DAutograd(
-        lambda_l1=lambda_l1,
+        lambda_l2=lambda_l2,
         lambda_ssim=lambda_ssim,
         window_size=window_size,
         tile_size=tile_size,
@@ -965,14 +965,14 @@ def create_gs2d_autograd(
 
 
 def create_gs2d_cuda(
-    lambda_l1: float = 1.0,
+    lambda_l2: float = 1.0,
     lambda_ssim: float = 0.0,
     window_size: int = 11,
     tile_size: int = 16,
 ) -> GS2DCUDA:
     """Create 2D Gaussian Splatting operator (CUDA version)."""
     return GS2DCUDA(
-        lambda_l1=lambda_l1,
+        lambda_l2=lambda_l2,
         lambda_ssim=lambda_ssim,
         window_size=window_size,
         tile_size=tile_size,

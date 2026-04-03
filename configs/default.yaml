@@ -8,4 +8,5 @@ defaults:
   - schedule: none
   - exp: 25_views
   - strategy: none
+  - vis: default
   - _self_

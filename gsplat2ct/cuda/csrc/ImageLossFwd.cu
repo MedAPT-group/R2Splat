@@ -20,7 +20,7 @@
 namespace gsplat2ct {
 
 // ============================================================================
-// L2 Map Kernel
+// L2/L1 Map Kernels
 // ============================================================================
 
 template <typename S>
@@ -37,6 +37,19 @@ __global__ void compute_l2_map_kernel(
     S tgt_val = target[idx];
     S diff = pred_val - tgt_val;
     l2_map[idx] = diff * diff;
+}
+
+template <typename S>
+__global__ void compute_l1_map_kernel(
+    const S* __restrict__ prediction,
+    const S* __restrict__ target,
+    S* __restrict__ l1_map,
+    int total_elements
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_elements) return;
+    S diff = prediction[idx] - target[idx];
+    l1_map[idx] = abs(diff);
 }
 
 // ============================================================================
@@ -159,7 +172,7 @@ __global__ void compute_ssim_statistics_kernel(
 // ============================================================================
 
 template <typename S>
-void launch_image_loss_fwd(
+void launch_image_loss_l2_fwd(
     const S* __restrict__ prediction,
     const S* __restrict__ target,
     const S* __restrict__ gaussian_window,
@@ -209,13 +222,71 @@ void launch_image_loss_fwd(
 }
 
 // Explicit template instantiations
-template void launch_image_loss_fwd<float>(
+template void launch_image_loss_l2_fwd<float>(
     const float*, const float*, const float*,
     float*, float*, float*, float*, float*, float*, float*, float*,
     int, int, int, int, bool, cudaStream_t
 );
 
-template void launch_image_loss_fwd<double>(
+template void launch_image_loss_l2_fwd<double>(
+    const double*, const double*, const double*,
+    double*, double*, double*, double*, double*, double*, double*, double*,
+    int, int, int, int, bool, cudaStream_t
+);
+
+template <typename S>
+void launch_image_loss_l1_fwd(
+    const S* __restrict__ prediction,
+    const S* __restrict__ target,
+    const S* __restrict__ gaussian_window,
+    S* __restrict__ l1_map,
+    S* __restrict__ mu_r,
+    S* __restrict__ mu_m,
+    S* __restrict__ f1,
+    S* __restrict__ f2,
+    S* __restrict__ f3,
+    S* __restrict__ f4,
+    S* __restrict__ ssim_map,
+    int B, int H, int W,
+    int window_size,
+    bool compute_statistics,
+    cudaStream_t stream
+) {
+    int total_pixels = B * H * W;
+    int pad_size = window_size / 2;
+    int out_H = H;
+    int out_W = W;
+    int total_outputs = B * out_H * out_W;
+
+    {
+        int threads = GSPLAT2CT_N_THREADS;
+        int blocks = (total_pixels + threads - 1) / threads;
+        compute_l1_map_kernel<S><<<blocks, threads, 0, stream>>>(
+            prediction, target, l1_map, total_pixels
+        );
+    }
+
+    {
+        int threads = GSPLAT2CT_N_THREADS;
+        int blocks = (total_outputs + threads - 1) / threads;
+        if (window_size <= 32) {
+            compute_ssim_statistics_kernel<S, 32><<<blocks, threads, 0, stream>>>(
+                prediction, target, gaussian_window,
+                mu_r, mu_m, f1, f2, f3, f4, ssim_map,
+                B, H, W, window_size, pad_size, out_H, out_W,
+                compute_statistics
+            );
+        }
+    }
+}
+
+template void launch_image_loss_l1_fwd<float>(
+    const float*, const float*, const float*,
+    float*, float*, float*, float*, float*, float*, float*, float*,
+    int, int, int, int, bool, cudaStream_t
+);
+
+template void launch_image_loss_l1_fwd<double>(
     const double*, const double*, const double*,
     double*, double*, double*, double*, double*, double*, double*, double*,
     int, int, int, int, bool, cudaStream_t

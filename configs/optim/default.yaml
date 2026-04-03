@@ -6,15 +6,19 @@
 use_second_order: false
 
 # Per-parameter learning rates
-lr_means: 0.002
-lr_quats: 0.0005
-lr_scale_ori: 0.01
-lr_opacity: 0.02
+lr_means: 0.0002 # r2-gaussian like
+lr_quats: 0.001 # r2-gaussian like
+lr_scale_ori: 0.005 # r2-gaussian like
+lr_opacity: 0.0001 # r2-gaussian like
+# r2-gaussian uses softplus activated opacities whereas we use no-activation
+# after training, r2-gaussian opacities mainly lie in [5e-3, 5e-2], where the gradient approximately lie in [5e-3, 5e-2]
+# for no-activation opacities, the gradient is 1.0
+# therefore, we use 1e-2 times the r2-gaussian learning rate: 1e-2 * 1e-2 = 1e-4
 
 # Adam hyper-parameters (first-order only)
-beta1: 0.9
-beta2: 0.999
-eps: 1.0e-8
+beta1: 0.9 # pytorch adam default
+beta2: 0.999 # pytorch adam default
+eps: 1.0e-8 # pytorch adam default
 
 # Newton hyper-parameters (second-order only)
 hess_mode: "DIAGONAL"

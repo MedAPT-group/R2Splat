@@ -7,8 +7,10 @@ batch_size: 1
 
 save_steps: [4999, 9999, 19999, 29999]
 
-# Image loss weights
-lambda_l1: 1.0
+# Image loss settings
+# image_loss_type: "l2" (default) or "l1"
+image_loss_type: "l2"
+lambda_l2: 1.0
 lambda_ssim: 0.25
 window_size: 11
 
@@ -26,8 +28,3 @@ vol_loss_eps: 1e-4
 
 # Evaluation
 eval_interval: 1000
-
-# Dataloader
-num_workers: 8
-pin_memory: true
-persistent_workers: true

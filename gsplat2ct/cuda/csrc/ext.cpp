@@ -26,12 +26,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     
     // Image Loss
     m.def("image_loss_fwd", &gsplat2ct::image_loss_fwd,
-          "Image loss (L1 + D-SSIM) forward pass");
+          "Image loss (L2 + D-SSIM) forward pass (backward-compatible alias)");
     
     m.def("image_loss_bwd", &gsplat2ct::image_loss_bwd,
-          "Image loss (L1 + D-SSIM) backward pass");
+          "Image loss (L2 + D-SSIM) backward pass (backward-compatible alias)");
     
     m.def("image_loss_bwd2", &gsplat2ct::image_loss_bwd2,
+          "Image loss (L2 + D-SSIM) second-order backward pass (backward-compatible alias)");
+
+    // Explicit Image Loss variants
+    m.def("image_loss_l2_fwd", &gsplat2ct::image_loss_l2_fwd,
+          "Image loss (L2 + D-SSIM) forward pass");
+    m.def("image_loss_l2_bwd", &gsplat2ct::image_loss_l2_bwd,
+          "Image loss (L2 + D-SSIM) backward pass");
+    m.def("image_loss_l2_bwd2", &gsplat2ct::image_loss_l2_bwd2,
+          "Image loss (L2 + D-SSIM) second-order backward pass (Hessian diagonal)");
+
+    m.def("image_loss_l1_fwd", &gsplat2ct::image_loss_l1_fwd,
+          "Image loss (L1 + D-SSIM) forward pass");
+    m.def("image_loss_l1_bwd", &gsplat2ct::image_loss_l1_bwd,
+          "Image loss (L1 + D-SSIM) backward pass");
+    m.def("image_loss_l1_bwd2", &gsplat2ct::image_loss_l1_bwd2,
           "Image loss (L1 + D-SSIM) second-order backward pass (Hessian diagonal)");
     
     // L2 Loss

@@ -1,7 +1,7 @@
 """Gaussian parameter initialization and serialization.
 
 ``GaussianParams`` bridges the gap between on-disk data (``init_<scene>.npy``)
-and the ``Params`` container consumed by ``GS3DCTTrainCUDA``.
+and the ``Params`` container consumed by ``GS3DCTLossCUDA``.
 
 Unlike r2splat1 where ``GaussianModel`` is an ``nn.Module`` that applies
 activation functions externally, here the raw (pre-activation) parameters

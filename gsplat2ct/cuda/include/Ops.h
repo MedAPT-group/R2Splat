@@ -166,6 +166,44 @@ std::tuple<
     bool compute_statistics
 );
 
+std::tuple<
+    torch::Tensor,  // loss
+    torch::Tensor,  // l2_loss
+    torch::Tensor,  // ssim_loss
+    torch::Tensor,  // mu_r
+    torch::Tensor,  // mu_m
+    torch::Tensor,  // f1
+    torch::Tensor,  // f2
+    torch::Tensor,  // f3
+    torch::Tensor   // f4
+> image_loss_l2_fwd(
+    const torch::Tensor& prediction,
+    const torch::Tensor& target,
+    int window_size,
+    float lambda_l2,
+    float lambda_ssim,
+    bool compute_statistics
+);
+
+std::tuple<
+    torch::Tensor,  // loss
+    torch::Tensor,  // l1_loss
+    torch::Tensor,  // ssim_loss
+    torch::Tensor,  // mu_r
+    torch::Tensor,  // mu_m
+    torch::Tensor,  // f1
+    torch::Tensor,  // f2
+    torch::Tensor,  // f3
+    torch::Tensor   // f4
+> image_loss_l1_fwd(
+    const torch::Tensor& prediction,
+    const torch::Tensor& target,
+    int window_size,
+    float lambda_l1,
+    float lambda_ssim,
+    bool compute_statistics
+);
+
 /**
  * Image Loss Backward Pass
  * 
@@ -197,6 +235,36 @@ torch::Tensor image_loss_bwd(
     float lambda_ssim
 );
 
+torch::Tensor image_loss_l2_bwd(
+    const torch::Tensor& prediction,
+    const torch::Tensor& target,
+    const torch::Tensor& mu_r,
+    const torch::Tensor& mu_m,
+    const torch::Tensor& f1,
+    const torch::Tensor& f2,
+    const torch::Tensor& f3,
+    const torch::Tensor& f4,
+    const torch::Tensor& grad_output,
+    int window_size,
+    float lambda_l2,
+    float lambda_ssim
+);
+
+torch::Tensor image_loss_l1_bwd(
+    const torch::Tensor& prediction,
+    const torch::Tensor& target,
+    const torch::Tensor& mu_r,
+    const torch::Tensor& mu_m,
+    const torch::Tensor& f1,
+    const torch::Tensor& f2,
+    const torch::Tensor& f3,
+    const torch::Tensor& f4,
+    const torch::Tensor& grad_output,
+    int window_size,
+    float lambda_l1,
+    float lambda_ssim
+);
+
 /**
  * Image Loss Second-Order Backward Pass
  * 
@@ -219,6 +287,36 @@ torch::Tensor image_loss_bwd2(
     const torch::Tensor& grad_output,
     int window_size,
     float lambda_l2,
+    float lambda_ssim
+);
+
+torch::Tensor image_loss_l2_bwd2(
+    const torch::Tensor& prediction,
+    const torch::Tensor& target,
+    const torch::Tensor& mu_r,
+    const torch::Tensor& mu_m,
+    const torch::Tensor& f1,
+    const torch::Tensor& f2,
+    const torch::Tensor& f3,
+    const torch::Tensor& f4,
+    const torch::Tensor& grad_output,
+    int window_size,
+    float lambda_l2,
+    float lambda_ssim
+);
+
+torch::Tensor image_loss_l1_bwd2(
+    const torch::Tensor& prediction,
+    const torch::Tensor& target,
+    const torch::Tensor& mu_r,
+    const torch::Tensor& mu_m,
+    const torch::Tensor& f1,
+    const torch::Tensor& f2,
+    const torch::Tensor& f3,
+    const torch::Tensor& f4,
+    const torch::Tensor& grad_output,
+    int window_size,
+    float lambda_l1,
     float lambda_ssim
 );
 

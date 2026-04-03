@@ -1,4 +1,4 @@
 # Experiment paths for 15-view cone-beam dataset.
 
 data_dir: "/home/chengzyi/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone"
-result_dir: "output/debug_0_chest_cone_25_views"
+result_dir: "output/0_chest_cone_25_views_r2gaussian_config"

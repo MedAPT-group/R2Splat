@@ -1,5 +1,5 @@
 """
-GS3DCTTrainCUDA: Main training operator for 3DGS-based CT reconstruction.
+GS3DCTLossCUDA: Full CT loss operator (end-to-end forward/backward chain).
 
 Combines two paths from shared ParameterTransform output (Scheme 3):
 
@@ -35,7 +35,7 @@ Expected config (rasterize path):
     - img_dim1, img_dim0:  image size
     - img_tile_size:       (default 16)
     - eps_blur:            ConicsMu / W2I blur epsilon (default 0.3)
-    - lambda_l1:           L1 loss weight (default 1.0)
+    - lambda_l2 (or legacy lambda_l1): MSE image term weight (default 1.0)
     - lambda_ssim:         SSIM loss weight (default 0.0)
     - window_size:         SSIM window size (default 11)
 
@@ -57,7 +57,16 @@ Date: 2026-03-19
 import torch
 from typing import Optional, Tuple
 from .base import SecondForwardBackwardBase
-from .data import Params, Data, Config, ForwardResult, GradResult, HessResult
+from .data import (
+    Params,
+    Data,
+    Config,
+    ForwardResult,
+    GradResult,
+    HessResult,
+    get_lambda_l2,
+)
+from .loss import l1_loss, l2_loss, ssim, tv_3d_loss, ImageLossTorch, VolumeLossTorch
 
 
 class _ParamWrapper:
@@ -66,11 +75,104 @@ class _ParamWrapper:
         self.data = data
 
 
-class GS3DCTTrainCUDA(SecondForwardBackwardBase):
-    """Main training operator combining rasterization + TV voxelization."""
+class GS3DCTLossCUDA(SecondForwardBackwardBase):
+    """Full-pipeline loss operator combining rasterization + TV voxelization.
 
-    def __init__(self):
+    Image loss mode is configurable:
+      - "l2": L2 + SSIM (default)
+      - "l1": L1 + SSIM
+    """
+
+    def __init__(self, image_loss_type: Optional[str] = None):
         self.initialized = False
+        self._default_image_loss_type = image_loss_type
+
+    # ------------------------------------------------------------------
+    # Image-loss hooks (override in subclasses if needed)
+    # ------------------------------------------------------------------
+    def _image_loss_fwd(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        window_size: int,
+        lambda_l1: float,
+        lambda_ssim: float,
+        compute_statistics: bool,
+        image_loss_type: str,
+    ):
+        if image_loss_type == "l1":
+            from ..cuda._wrapper import image_loss_l1_fwd as _fwd
+        else:
+            from ..cuda._wrapper import image_loss_l2_fwd as _fwd
+        return _fwd(
+            prediction, target, window_size,
+            lambda_l1, lambda_ssim, compute_statistics,
+        )
+
+    def _image_loss_bwd(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        mu_r: torch.Tensor,
+        mu_m: torch.Tensor,
+        f1: torch.Tensor,
+        f2: torch.Tensor,
+        f3: torch.Tensor,
+        f4: torch.Tensor,
+        grad_output: torch.Tensor,
+        window_size: int,
+        lambda_l1: float,
+        lambda_ssim: float,
+        image_loss_type: str,
+    ):
+        if image_loss_type == "l1":
+            from ..cuda._wrapper import image_loss_l1_bwd as _bwd
+        else:
+            from ..cuda._wrapper import image_loss_l2_bwd as _bwd
+        return _bwd(
+            prediction, target,
+            mu_r, mu_m, f1, f2, f3, f4,
+            grad_output, window_size,
+            lambda_l1, lambda_ssim,
+        )
+
+    def _image_loss_bwd2(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        mu_r: torch.Tensor,
+        mu_m: torch.Tensor,
+        f1: torch.Tensor,
+        f2: torch.Tensor,
+        f3: torch.Tensor,
+        f4: torch.Tensor,
+        grad_output: torch.Tensor,
+        window_size: int,
+        lambda_l1: float,
+        lambda_ssim: float,
+        image_loss_type: str,
+    ):
+        if image_loss_type == "l1":
+            from ..cuda._wrapper import image_loss_l1_bwd2 as _bwd2
+        else:
+            from ..cuda._wrapper import image_loss_l2_bwd2 as _bwd2
+        return _bwd2(
+            prediction, target,
+            mu_r, mu_m, f1, f2, f3, f4,
+            grad_output, window_size,
+            lambda_l1, lambda_ssim,
+        )
+
+    def _resolve_image_loss_type(self, config: Optional[Config]) -> str:
+        mode = self._default_image_loss_type
+        if mode is None and config is not None:
+            mode = config.get("image_loss_type", None)
+        if mode is None:
+            mode = "l2"
+        mode = str(mode).lower()
+        if mode not in ("l1", "l2"):
+            raise ValueError(f"image_loss_type must be 'l1' or 'l2', got: {mode}")
+        return mode
 
     def initialize(self, params: Params, config: Optional[Config] = None) -> None:
         for name in ['means', 'quats', 'scale_ori', 'opacity']:
@@ -103,7 +205,8 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         img_dim0 = config.get('img_dim0')
         img_tile_size = config.get('img_tile_size', 16)
         eps_blur = config.get('eps_blur', 0.3)
-        lambda_l1 = config.get('lambda_l1', 1.0)
+        # Image term weight (MSE): config key ``lambda_l2`` or legacy ``lambda_l1``
+        lambda_l1 = get_lambda_l2(config, 1.0)
         lambda_ssim = config.get('lambda_ssim', 0.0)
         window_size = config.get('window_size', 11)
 
@@ -119,13 +222,15 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         scale_min = config.get('scale_min', 0.01)
         scale_max = config.get('scale_max', 2.0)
 
+        image_loss_type = config.get('image_loss_type', None)
+
         return (means, quats, scale_ori, opacity,
                 viewmats, Ks, targets, vol_ranges, vol_centers,
                 img_dim1, img_dim0, img_tile_size, eps_blur,
                 lambda_l1, lambda_ssim, window_size,
                 vol_dim2, vol_dim1, vol_dim0, vol_tile_size,
                 eps3d, radius_clip, vol_loss_eps, lambda_tv,
-                scale_min, scale_max)
+                scale_min, scale_max, image_loss_type)
 
     # ------------------------------------------------------------------
     # forward_only
@@ -141,7 +246,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             parameter_transform_fwd,
             world_to_image_projection_fwd, conics_mu_fwd,
             isect_tiles, isect_offset_encode,
-            rasterize_to_pixels_fwd, image_loss_fwd,
+            rasterize_to_pixels_fwd,
             world_to_volume_mapping_fwd,
             isect_tiles_3d, isect_offset_encode_3d,
             voxelize_to_voxels_fwd, volume_loss_fwd,
@@ -153,7 +258,8 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
          lambda_l1, lambda_ssim, window_size,
          vol_dim2, vol_dim1, vol_dim0, vol_tile_size,
          eps3d, radius_clip, vol_loss_eps, lambda_tv,
-         scale_min, scale_max) = self._extract(params, data, config)
+         scale_min, scale_max, image_loss_type_cfg) = self._extract(params, data, config)
+        image_loss_type = self._resolve_image_loss_type(config) if image_loss_type_cfg is None else str(image_loss_type_cfg).lower()
 
         C = viewmats.shape[0]
         N = means.shape[0]
@@ -187,10 +293,11 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             img_dim1, img_dim0, img_tile_size
         )
 
-        img_loss_result = image_loss_fwd(
+        img_loss_result = self._image_loss_fwd(
             render_img, targets, window_size,
             lambda_l1, lambda_ssim,
-            compute_statistics=False
+            compute_statistics=False,
+            image_loss_type=image_loss_type,
         )
         img_loss = img_loss_result[0]
 
@@ -251,7 +358,6 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             conics_mu_fwd, conics_mu_bwd,
             isect_tiles, isect_offset_encode,
             rasterize_to_pixels_fwd, rasterize_to_pixels_bwd,
-            image_loss_fwd, image_loss_bwd,
             world_to_volume_mapping_fwd, world_to_volume_mapping_bwd,
             isect_tiles_3d, isect_offset_encode_3d,
             voxelize_to_voxels_fwd, voxelize_to_voxels_bwd,
@@ -264,7 +370,8 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
          lambda_l1, lambda_ssim, window_size,
          vol_dim2, vol_dim1, vol_dim0, vol_tile_size,
          eps3d, radius_clip, vol_loss_eps, lambda_tv,
-         scale_min, scale_max) = self._extract(params, data, config)
+         scale_min, scale_max, image_loss_type_cfg) = self._extract(params, data, config)
+        image_loss_type = self._resolve_image_loss_type(config) if image_loss_type_cfg is None else str(image_loss_type_cfg).lower()
 
         C = viewmats.shape[0]
         N = means.shape[0]
@@ -302,10 +409,11 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             img_dim1, img_dim0, img_tile_size
         )
 
-        img_loss_result = image_loss_fwd(
+        img_loss_result = self._image_loss_fwd(
             render_img, targets, window_size,
             lambda_l1, lambda_ssim,
-            compute_statistics=True
+            compute_statistics=True,
+            image_loss_type=image_loss_type,
         )
         img_loss = img_loss_result[0]
         mu_r, mu_m = img_loss_result[3], img_loss_result[4]
@@ -348,11 +456,12 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         # ============================================================
         grad_one = torch.ones(1, device=means.device, dtype=means.dtype)
 
-        v_render_img = image_loss_bwd(
+        v_render_img = self._image_loss_bwd(
             render_img, targets,
             mu_r, mu_m, f1, f2, f3, f4,
             grad_one, window_size,
-            lambda_l1, lambda_ssim
+            lambda_l1, lambda_ssim,
+            image_loss_type=image_loss_type,
         )
 
         absgrad = bool(config.get("absgrad", False)) if config is not None else False
@@ -424,6 +533,7 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             aux={
                 'v_means2d': v_means2d,
                 'v_means2d_abs': v_means2d_abs,
+                'radii_2d': radii_2d,
             },
         )
         return forward_result, grad_result
@@ -450,7 +560,6 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             conics_mu_fwd, conics_mu_bwd2,
             isect_tiles, isect_offset_encode,
             rasterize_to_pixels_fwd, rasterize_to_pixels_bwd2,
-            image_loss_fwd, image_loss_bwd, image_loss_bwd2,
             world_to_volume_mapping_fwd, world_to_volume_mapping_bwd2,
             isect_tiles_3d, isect_offset_encode_3d,
             voxelize_to_voxels_fwd, voxelize_to_voxels_bwd2,
@@ -463,7 +572,8 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
          lambda_l1, lambda_ssim, window_size,
          vol_dim2, vol_dim1, vol_dim0, vol_tile_size,
          eps3d, radius_clip, vol_loss_eps, lambda_tv,
-         scale_min, scale_max) = self._extract(params, data, config)
+         scale_min, scale_max, image_loss_type_cfg) = self._extract(params, data, config)
+        image_loss_type = self._resolve_image_loss_type(config) if image_loss_type_cfg is None else str(image_loss_type_cfg).lower()
 
         C = viewmats.shape[0]
         N = means.shape[0]
@@ -504,10 +614,11 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             img_dim1, img_dim0, img_tile_size
         )
 
-        img_loss_result = image_loss_fwd(
+        img_loss_result = self._image_loss_fwd(
             render_img, targets, window_size,
             lambda_l1, lambda_ssim,
-            compute_statistics=True
+            compute_statistics=True,
+            image_loss_type=image_loss_type,
         )
         img_loss = img_loss_result[0]
         mu_r, mu_m = img_loss_result[3], img_loss_result[4]
@@ -517,15 +628,17 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         # RASTERIZE PATH: backward2
         # ==============================================================
 
-        v_render_img = image_loss_bwd(
+        v_render_img = self._image_loss_bwd(
             render_img, targets,
             mu_r, mu_m, f1, f2, f3, f4,
-            grad_one, window_size, lambda_l1, lambda_ssim
+            grad_one, window_size, lambda_l1, lambda_ssim,
+            image_loss_type=image_loss_type,
         )
-        h_render_img = image_loss_bwd2(
+        h_render_img = self._image_loss_bwd2(
             render_img, targets,
             mu_r, mu_m, f1, f2, f3, f4,
-            grad_one, window_size, lambda_l1, lambda_ssim
+            grad_one, window_size, lambda_l1, lambda_ssim,
+            image_loss_type=image_loss_type,
         )
 
         (v_means2d_r, v_conics_2d_r, v_opacity_rast, v_mus_r,
@@ -690,6 +803,8 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
             },
             aux={
                 'v_means2d': v_means2d_r,
+                'v_means2d_abs': None,
+                'radii_2d': radii_2d,
             },
         )
 
@@ -713,4 +828,272 @@ class GS3DCTTrainCUDA(SecondForwardBackwardBase):
         return forward_result, grad_result, hess_result
 
 
-__all__ = ["GS3DCTTrainCUDA"]
+class GS3DCTLossAutograd(SecondForwardBackwardBase):
+    """Torch autograd reference for the full GS3D CT loss pipeline."""
+
+    def __init__(self, image_loss_type: Optional[str] = None):
+        self.initialized = False
+        self._default_image_loss_type = image_loss_type
+
+    def initialize(self, params: Params, config: Optional[Config] = None) -> None:
+        for name in ["means", "quats", "scale_ori", "opacity"]:
+            if params.get(name) is None:
+                raise ValueError(f"Missing required parameter: {name}")
+        self.initialized = True
+
+    def _resolve_image_loss_type(self, config: Optional[Config]) -> str:
+        mode = self._default_image_loss_type
+        if mode is None and config is not None:
+            mode = config.get("image_loss_type", None)
+        if mode is None:
+            mode = "l2"
+        mode = str(mode).lower()
+        if mode not in ("l1", "l2"):
+            raise ValueError(f"image_loss_type must be 'l1' or 'l2', got: {mode}")
+        return mode
+
+    def _forward_pipeline(
+        self,
+        means, quats, scale_ori, opacity,
+        viewmats, Ks, targets, vol_ranges, vol_centers,
+        img_dim1, img_dim0, eps_blur, lambda_img, lambda_ssim, window_size,
+        vol_dim2, vol_dim1, vol_dim0, eps3d, radius_clip, vol_loss_eps, lambda_tv,
+        scale_min, scale_max, image_loss_type,
+    ):
+        from .parameter_transform import _compute_covars
+        from .world_to_image_projection import _compute_world_to_image_projection
+        from .conics_mu import _compute_conics_mu
+        from .world_to_volume_mapping import _compute_world_to_volume_mapping
+
+        covars = _compute_covars(quats, scale_ori, scale_min, scale_max)
+        sig = torch.sigmoid(scale_ori)
+        scales = sig * (scale_max - scale_min) + scale_min
+        max_scales = scales.max(dim=-1).values
+
+        # Rasterize path
+        means2d, cov2d_3x3 = _compute_world_to_image_projection(
+            means, covars, viewmats, Ks, img_dim1, img_dim0
+        )
+        conics, mus_2d = _compute_conics_mu(cov2d_3x3, eps_blur)
+
+        device = means.device
+        dtype = means.dtype
+        y_coords = torch.arange(img_dim0, device=device, dtype=dtype) + 0.5
+        x_coords = torch.arange(img_dim1, device=device, dtype=dtype) + 0.5
+        py, px = torch.meshgrid(y_coords, x_coords, indexing="ij")
+        px = px.unsqueeze(0).unsqueeze(0)
+        py = py.unsqueeze(0).unsqueeze(0)
+
+        mean_x = means2d[..., 0].unsqueeze(-1).unsqueeze(-1)
+        mean_y = means2d[..., 1].unsqueeze(-1).unsqueeze(-1)
+        conic_a = conics[..., 0].unsqueeze(-1).unsqueeze(-1)
+        conic_b = conics[..., 1].unsqueeze(-1).unsqueeze(-1)
+        conic_c = conics[..., 2].unsqueeze(-1).unsqueeze(-1)
+        opa = opacity.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        mu = mus_2d.unsqueeze(-1).unsqueeze(-1)
+        dx = px - mean_x
+        dy = py - mean_y
+        sigma = 0.5 * (conic_a * dx * dx + conic_c * dy * dy) + conic_b * dx * dy
+        vis = torch.exp(-sigma)
+        alpha = opa * mu * vis
+        mask = (sigma >= 0) & (alpha.abs() >= 1e-5)
+        render_img = torch.where(mask, alpha, torch.zeros_like(alpha)).sum(dim=1)
+
+        if image_loss_type == "l1":
+            img_base = l1_loss(render_img, targets)
+        else:
+            img_base = l2_loss(render_img, targets)
+        img_ssim = 1.0 - ssim(render_img, targets, window_size=window_size)
+        img_loss = float(lambda_img) * img_base + float(lambda_ssim) * img_ssim
+
+        # Voxelize path
+        means3d_v, conics_3d, _radii = _compute_world_to_volume_mapping(
+            means, covars, max_scales, vol_ranges, vol_centers,
+            vol_dim2, vol_dim1, vol_dim0, eps3d,
+        )
+        z_c = torch.arange(vol_dim0, device=device, dtype=dtype) + 0.5
+        y_c = torch.arange(vol_dim1, device=device, dtype=dtype) + 0.5
+        x_c = torch.arange(vol_dim2, device=device, dtype=dtype) + 0.5
+        zz, yy, xx = torch.meshgrid(z_c, y_c, x_c, indexing="ij")
+        voxel_coords = torch.stack([xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)], dim=-1)
+        delta = voxel_coords.unsqueeze(1) - means3d_v.unsqueeze(0)
+        d_x, d_y, d_z = delta[..., 0], delta[..., 1], delta[..., 2]
+        a = conics_3d[:, 0].unsqueeze(0)
+        p = conics_3d[:, 1].unsqueeze(0)
+        q = conics_3d[:, 2].unsqueeze(0)
+        b = conics_3d[:, 3].unsqueeze(0)
+        r = conics_3d[:, 4].unsqueeze(0)
+        c = conics_3d[:, 5].unsqueeze(0)
+        sig3d = 0.5 * (a * d_x * d_x + b * d_y * d_y + c * d_z * d_z) + p * d_x * d_y + q * d_x * d_z + r * d_y * d_z
+        G = opacity.unsqueeze(0) * torch.exp(-sig3d)
+        mask3d = (sig3d >= 0) & (G.abs() >= 1e-5)
+        render_vol = torch.where(mask3d, G, torch.zeros_like(G)).sum(dim=1).reshape(vol_dim0, vol_dim1, vol_dim2)
+        vol_loss = float(lambda_tv) * tv_3d_loss(render_vol.unsqueeze(0), eps=float(vol_loss_eps))
+
+        loss = img_loss + vol_loss
+        return loss, img_loss, vol_loss, render_img, render_vol
+
+    def _unpack(self, params, data, config, requires_grad=False):
+        means = params.get("means").data
+        quats = params.get("quats").data
+        scale_ori = params.get("scale_ori").data
+        opacity = params.get("opacity").data
+        if requires_grad:
+            means = means.detach().clone().requires_grad_(True)
+            quats = quats.detach().clone().requires_grad_(True)
+            scale_ori = scale_ori.detach().clone().requires_grad_(True)
+            opacity = opacity.detach().clone().requires_grad_(True)
+        return (
+            means, quats, scale_ori, opacity,
+            data.get("viewmats"), data.get("Ks"), data.get("targets"),
+            data.get("vol_ranges"), data.get("vol_centers"),
+            config.get("img_dim1"), config.get("img_dim0"), config.get("eps_blur", 0.3),
+            get_lambda_l2(config, 1.0), config.get("lambda_ssim", 0.0), config.get("window_size", 11),
+            config.get("vol_dim2"), config.get("vol_dim1"), config.get("vol_dim0"),
+            config.get("eps3d", 1e-4), config.get("radius_clip", 3.0),
+            config.get("vol_loss_eps", 1e-4), config.get("lambda_tv", 1.0),
+            config.get("scale_min", 0.01), config.get("scale_max", 2.0),
+            self._resolve_image_loss_type(config),
+        )
+
+    def forward_only(self, params, data, config=None):
+        with torch.no_grad():
+            loss, img_loss, vol_loss, ri, rv = self._forward_pipeline(*self._unpack(params, data, config))
+        return ForwardResult(
+            outputs={"loss": loss, "loss_image": img_loss, "loss_tv": vol_loss, "render_image": ri, "render_volume": rv},
+            intermediates={},
+        )
+
+    def forward_backward1(self, params, data, config=None):
+        e = self._unpack(params, data, config, requires_grad=True)
+        means, quats, scale_ori, opacity = e[:4]
+        loss, img_loss, vol_loss, ri, rv = self._forward_pipeline(*e)
+        loss.backward()
+        return (
+            ForwardResult(outputs={"loss": loss.detach(), "loss_image": img_loss.detach(), "loss_tv": vol_loss.detach(), "render_image": ri.detach(), "render_volume": rv.detach()}, intermediates={}),
+            GradResult(param_grads={"means": means.grad.detach(), "quats": quats.grad.detach(), "scale_ori": scale_ori.grad.detach(), "opacity": opacity.grad.detach()}, aux={}),
+        )
+
+    def forward_backward2(self, params, data, config=None):
+        e = self._unpack(params, data, config, requires_grad=True)
+        means, quats, scale_ori, opacity = e[:4]
+        N = means.shape[0]
+        dtype = means.dtype
+        device = means.device
+        (
+            _means, _quats, _scale_ori, _opacity,
+            _viewmats, _Ks, targets, _vol_ranges, _vol_centers,
+            _img_dim1, _img_dim0, _eps_blur, lambda_img, lambda_ssim, window_size,
+            _vol_dim2, _vol_dim1, _vol_dim0, _eps3d, _radius_clip, vol_loss_eps, lambda_tv,
+            _scale_min, _scale_max, image_loss_type,
+        ) = e
+        loss, img_loss, vol_loss, ri, rv = self._forward_pipeline(*e)
+
+        # Build a decoupled surrogate objective around current outputs so that
+        # first-order gradients match exactly while second-order terms use
+        # output-wise diagonal Hessians.
+        target_img = targets
+        n_img = float(ri.numel())
+        if image_loss_type == "l1":
+            grad_base = torch.sign(ri - target_img) / n_img
+            hess_base = torch.zeros_like(ri)
+        else:
+            grad_base = 2.0 * (ri - target_img) / n_img
+            hess_base = (2.0 / n_img) * torch.ones_like(ri)
+        img_helper = ImageLossTorch(lambda_l2=1.0, lambda_ssim=1.0, window_size=int(window_size))
+        grad_ssim = img_helper._compute_ssim_grad_by_window(ri, target_img, int(window_size))
+        hess_ssim = img_helper._compute_ssim_hess_by_window(ri, target_img, int(window_size))
+        v_img = float(lambda_img) * grad_base + float(lambda_ssim) * grad_ssim
+        h_img = float(lambda_img) * hess_base + float(lambda_ssim) * hess_ssim
+
+        vol4d = rv.unsqueeze(0)
+        vol_helper = VolumeLossTorch(eps=float(vol_loss_eps))
+        v_tv = vol_helper._compute_smooth_tv_grad_manual(vol4d, float(vol_loss_eps))
+        h_tv = vol_helper._compute_smooth_tv_hess_manual(vol4d, float(vol_loss_eps))
+
+        ri0 = ri.detach()
+        rv0 = vol4d.detach()
+        surrogate = (v_img.detach() * (ri - ri0)).sum()
+        surrogate = surrogate + 0.5 * (h_img.detach() * (ri - ri0) ** 2).sum()
+        surrogate = surrogate + float(lambda_tv) * (v_tv.detach() * (vol4d - rv0)).sum()
+        surrogate = surrogate + 0.5 * float(lambda_tv) * (h_tv.detach() * (vol4d - rv0) ** 2).sum()
+
+        all_params = [means, quats, scale_ori, opacity]
+        v_means, v_quats, v_scale_ori, v_opacity = torch.autograd.grad(
+            surrogate, all_params, create_graph=True, retain_graph=True
+        )
+
+        h_pp = torch.zeros(N, 3, 3, dtype=dtype, device=device)
+        h_qq = torch.zeros(N, 4, 4, dtype=dtype, device=device)
+        h_ss = torch.zeros(N, 3, 3, dtype=dtype, device=device)
+        h_oo = torch.zeros(N, dtype=dtype, device=device)
+        h_pq = torch.zeros(N, 3, 4, dtype=dtype, device=device)
+        h_ps = torch.zeros(N, 3, 3, dtype=dtype, device=device)
+        h_po = torch.zeros(N, 3, dtype=dtype, device=device)
+        h_qs = torch.zeros(N, 4, 3, dtype=dtype, device=device)
+        h_qo = torch.zeros(N, 4, dtype=dtype, device=device)
+        h_so = torch.zeros(N, 3, dtype=dtype, device=device)
+
+        for g in range(N):
+            for i in range(3):
+                grads = torch.autograd.grad(v_means[g, i], all_params, retain_graph=True, allow_unused=True)
+                g_p = grads[0] if grads[0] is not None else torch.zeros_like(means)
+                g_q = grads[1] if grads[1] is not None else torch.zeros_like(quats)
+                g_s = grads[2] if grads[2] is not None else torch.zeros_like(scale_ori)
+                g_o = grads[3] if grads[3] is not None else torch.zeros_like(opacity)
+                h_pp[g, i, :] = g_p[g, :]
+                h_pq[g, i, :] = g_q[g, :]
+                h_ps[g, i, :] = g_s[g, :]
+                h_po[g, i] = g_o[g]
+            for i in range(4):
+                grads = torch.autograd.grad(v_quats[g, i], [quats, scale_ori, opacity], retain_graph=True, allow_unused=True)
+                g_q = grads[0] if grads[0] is not None else torch.zeros_like(quats)
+                g_s = grads[1] if grads[1] is not None else torch.zeros_like(scale_ori)
+                g_o = grads[2] if grads[2] is not None else torch.zeros_like(opacity)
+                h_qq[g, i, :] = g_q[g, :]
+                h_qs[g, i, :] = g_s[g, :]
+                h_qo[g, i] = g_o[g]
+            for i in range(3):
+                grads = torch.autograd.grad(v_scale_ori[g, i], [scale_ori, opacity], retain_graph=True, allow_unused=True)
+                g_s = grads[0] if grads[0] is not None else torch.zeros_like(scale_ori)
+                g_o = grads[1] if grads[1] is not None else torch.zeros_like(opacity)
+                h_ss[g, i, :] = g_s[g, :]
+                h_so[g, i] = g_o[g]
+            grads = torch.autograd.grad(v_opacity[g], [opacity], retain_graph=True, allow_unused=True)
+            g_o = grads[0] if grads[0] is not None else torch.zeros_like(opacity)
+            h_oo[g] = g_o[g]
+
+        h_means_out = torch.zeros(N, 6, dtype=dtype, device=device)
+        idx = 0
+        for i in range(3):
+            for j in range(i, 3):
+                h_means_out[:, idx] = h_pp[:, i, j]
+                idx += 1
+        h_quats_out = torch.zeros(N, 10, dtype=dtype, device=device)
+        idx = 0
+        for i in range(4):
+            for j in range(i, 4):
+                h_quats_out[:, idx] = h_qq[:, i, j]
+                idx += 1
+        h_scale_ori_out = torch.stack([h_ss[:, i, i] for i in range(3)], dim=-1)
+        h_quats_scale_ori_out = h_qs.reshape(N, 12)
+        h_quats_means_out = h_pq.transpose(-1, -2).reshape(N, 12)
+        h_scale_ori_means_out = h_ps.transpose(-1, -2).reshape(N, 9)
+
+        fwd = ForwardResult(outputs={"loss": loss.detach(), "loss_image": img_loss.detach(), "loss_tv": vol_loss.detach(), "render_image": ri.detach(), "render_volume": rv.detach()}, intermediates={})
+        grad_r = GradResult(param_grads={"means": v_means.detach(), "quats": v_quats.detach(), "scale_ori": v_scale_ori.detach(), "opacity": v_opacity.detach()}, aux={})
+        hess_r = HessResult(
+            param_hess={"means": h_means_out.detach(), "quats": h_quats_out.detach(), "scale_ori": h_scale_ori_out.detach(), "opacity": h_oo.detach()},
+            cross_hess={
+                "quats_scale_ori": h_quats_scale_ori_out.detach(),
+                "means_opacity": h_po.detach(),
+                "quats_means": h_quats_means_out.detach(),
+                "quats_opacity": h_qo.detach(),
+                "scale_ori_means": h_scale_ori_means_out.detach(),
+                "scale_ori_opacity": h_so.detach(),
+            },
+        )
+        return fwd, grad_r, hess_r
+
+
+__all__ = ["GS3DCTLossCUDA", "GS3DCTLossAutograd"]

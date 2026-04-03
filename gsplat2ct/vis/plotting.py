@@ -14,6 +14,48 @@ from matplotlib.gridspec import GridSpec
 import numpy as np
 import torch
 
+def save_projection_triplet(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    path: str,
+    *,
+    value_range: Tuple[float, float] = (0.0, 1.0),
+    title: Optional[str] = None,
+) -> None:
+    """Save a single (GT, Pred, |Pred-GT|) visualization.
+
+    Args:
+        pred: Predicted projection image (H, W).
+        gt: Ground-truth projection image (H, W).
+        path: Output image path.
+        value_range: Shared fixed range for all three panels.
+        title: Optional figure title.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    pred_np = pred.detach().cpu().numpy()
+    gt_np = gt.detach().cpu().numpy()
+    diff_np = np.abs(pred_np - gt_np)
+    vmin, vmax = float(value_range[0]), float(value_range[1])
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    panels = [
+        (gt_np, "Ground Truth"),
+        (pred_np, "Prediction"),
+        (diff_np, "Abs Difference"),
+    ]
+    for ax, (img, panel_title) in zip(axes, panels):
+        im = ax.imshow(img, cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal")
+        ax.set_title(panel_title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    if title is not None:
+        fig.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
 
 def save_projection_comparison(
     pairs: Sequence[Tuple[torch.Tensor, torch.Tensor]],

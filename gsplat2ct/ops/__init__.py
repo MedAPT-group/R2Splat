@@ -20,6 +20,7 @@ from .data import (
     ForwardResult,
     GradResult,
     HessResult,
+    get_lambda_l2,
 )
 
 # Import MLP classification operators
@@ -145,6 +146,7 @@ from .gs3d_voxelization_only import (
     GS3DVoxelizationOnlyAutograd,
     create_gs3d_voxelization_only,
 )
+from .gs3d_ct_train import GS3DCTLossCUDA, GS3DCTLossAutograd
 
 
 __all__ = [
@@ -158,6 +160,7 @@ __all__ = [
     "ForwardResult",
     "GradResult",
     "HessResult",
+    "get_lambda_l2",
     # MLP classification
     "MLPClassificationCUDA",
     "MLPClassificationTorch",
@@ -241,6 +244,9 @@ __all__ = [
     "GS3DVoxelizationOnlyCUDA",
     "GS3DVoxelizationOnlyAutograd",
     "create_gs3d_voxelization_only",
+    # GS3D CT full loss pipelines
+    "GS3DCTLossCUDA",
+    "GS3DCTLossAutograd",
     # Utility functions
     "l1_loss",
     "ssim",
