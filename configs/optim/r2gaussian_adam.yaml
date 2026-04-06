@@ -6,7 +6,7 @@ use_second_order: false
 lr_means: 0.0002
 lr_quats: 0.001
 lr_scale_ori: 0.005
-lr_opacity: 0.00005
+lr_opacity: 0.001 # different from R2Gaussian original cuz we use raw opacity without activation
 
 # Adam hyper-parameters
 beta1: 0.9

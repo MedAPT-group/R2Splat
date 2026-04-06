@@ -2,7 +2,7 @@
  * Isect Tiles CUDA Kernel Launch Functions
  * 
  * This header declares the launch functions that bridge between
- * C++ tensor processing (IsectTiles.cpp) and CUDA kernels (IsectTiles.cu).
+ * C++ tensor processing (IsectTiles.cpp) and CUDA kernels (IsectTilesKernel.cu).
  * 
  * The module computes tile-Gaussian intersections for CT reconstruction.
  * Unlike alpha-blending rendering, CT reconstruction uses simple ray summation,

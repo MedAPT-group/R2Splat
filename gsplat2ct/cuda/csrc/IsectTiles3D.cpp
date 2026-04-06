@@ -9,7 +9,7 @@
  * 
  * Following gsplat's pattern for tensor handling.
  * 
- * Note: CUB operations are in IsectTiles3D.cu because CUB requires CUDA compilation.
+ * Note: CUB operations are in IsectTiles3DKernel.cu because CUB requires CUDA compilation.
  * 
  * Author: Dy164
  * Date: 2025-01-12

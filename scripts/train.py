@@ -211,6 +211,15 @@ def build_optimizer(cfg: DictConfig, params: Params):
 # =====================================================================
 
 def train(cfg: DictConfig) -> None:
+    # Weights & Biases (optional): used when running `wandb agent` for hyperparameter sweeps.
+    try:
+        import wandb  # type: ignore
+
+        if os.environ.get("WANDB_SWEEP_ID") is not None and wandb.run is None:
+            wandb.init()
+    except ImportError:
+        pass
+
     device = torch.device(cfg.trainer.device if torch.cuda.is_available() else "cpu")
     # Always prepend a timestamp to output directory name.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -492,6 +501,8 @@ def _run_eval(
     step: int,
 ) -> None:
     """Run 2-D and 3-D evaluation and save visualizations."""
+    log_dict: Dict[str, float] = {}
+
     proj_eval = ProjectionEvaluator(
         params,
         scale_min=cfg.model.scale_min,
@@ -505,6 +516,12 @@ def _run_eval(
         f"PSNR={proj_metrics['psnr']:.2f} dB, "
         f"SSIM={proj_metrics['ssim']:.4f}"
     )
+    log_dict.update({
+        "img_metrics/l1": float(proj_metrics["l1"]),
+        "img_metrics/mse": float(proj_metrics["mse"]),
+        "img_metrics/psnr": float(proj_metrics["psnr"]),
+        "img_metrics/ssim": float(proj_metrics["ssim"]),
+    })
 
     if vis_pairs:
         vis_cfg = getattr(cfg, "vis", None)
@@ -530,6 +547,14 @@ def _run_eval(
             f"Vol PSNR={vol_metrics['psnr']:.2f} dB, "
             f"Vol SSIM={vol_metrics['ssim']:.4f}"
         )
+        log_dict.update({
+            "vol_metrics/l1": float(vol_metrics["l1"]),
+            "vol_metrics/mse": float(vol_metrics["mse"]),
+            "vol_metrics/psnr": float(vol_metrics["psnr"]),
+            "vol_metrics/ssim": float(vol_metrics["ssim"]),
+            # Backward compatibility with existing sweep configs.
+            "vol/psnr": float(vol_metrics["psnr"]),
+        })
         vis_cfg = getattr(cfg, "vis", None)
         if bool(getattr(vis_cfg, "save_volume_comparison", False)):
             save_volume_comparison(
@@ -537,6 +562,14 @@ def _run_eval(
                 os.path.join(vis_dir, f"vol_step_{step}.png"),
                 psnr_val=vol_metrics["psnr"],
             )
+
+    try:
+        import wandb  # type: ignore
+
+        if wandb.run is not None and log_dict:
+            wandb.log(log_dict, step=step)
+    except ImportError:
+        pass
 
 
 # =====================================================================

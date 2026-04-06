@@ -1,13 +1,13 @@
 # Visualization configuration branch (all disabled by default).
 
 # Existing image visualizations saved at eval time.
-save_projection_comparison: true
-save_volume_comparison: true
-save_loss_curve: true
+save_projection_comparison: false
+save_volume_comparison: false
+save_loss_curve: false
 
 # Fixed-view training video visualization.
 video:
-  enabled: true
+  enabled: false
   interval: 25
   view_index: 0
   fps: 50

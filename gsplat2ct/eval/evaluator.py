@@ -61,7 +61,13 @@ class ProjectionEvaluator:
         up to *max_vis* (pred, target) image pairs for visualization."""
         dataset.preload_to(device)
 
-        psnr_vals, ssim_vals = [], []
+        metric_sums: Dict[str, float] = {
+            "l1": 0.0,
+            "mse": 0.0,
+            "psnr": 0.0,
+            "ssim": 0.0,
+        }
+        metric_count = 0
         vis_pairs: List[Tuple[torch.Tensor, torch.Tensor]] = []
         import numpy as np
         vis_indices = set(
@@ -108,17 +114,20 @@ class ProjectionEvaluator:
             m = metric_proj(
                 pred, gt_squeezed, window_size=self.ssim_window
             )
-            psnr_vals.append(float(m["psnr"].item()))
-            ssim_vals.append(float(m["ssim"].item()))
+            metric_sums["l1"] += float(m["l1"].item())
+            metric_sums["mse"] += float(m["mse"].item())
+            metric_sums["psnr"] += float(m["psnr"].item())
+            metric_sums["ssim"] += float(m["ssim"].item())
+            metric_count += 1
 
             if idx in vis_indices:
                 vis_pairs.append(
                     (pred[0].cpu(), gt_squeezed[0].cpu())
                 )
 
+        denom = max(metric_count, 1)
         metrics = {
-            "psnr": float(sum(psnr_vals) / max(len(psnr_vals), 1)),
-            "ssim": float(sum(ssim_vals) / max(len(ssim_vals), 1)),
+            k: float(v / denom) for k, v in metric_sums.items()
         }
         return metrics, vis_pairs
 

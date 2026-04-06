@@ -19,12 +19,12 @@ lambda_tv: 0.05
 tv_vol_size: 32
 
 # Operator parameters
-eps_blur: 1e-4
+eps_blur: 1.0e-8
 img_tile_size: 16
 vol_tile_size: 8
-eps3d: 1.0e-4
+eps3d: 1.0e-8
 radius_clip: 3.0
-vol_loss_eps: 1e-4
+vol_loss_eps: 1.0e-4
 
 # Evaluation
 eval_interval: 1000

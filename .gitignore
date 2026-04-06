@@ -30,3 +30,6 @@ dist/
 .DS_Store
 # 日志文件
 *.log
+
+# ============== wandb和sweep ==============
+wandb/

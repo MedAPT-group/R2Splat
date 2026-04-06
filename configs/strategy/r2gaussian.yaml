@@ -16,7 +16,7 @@ refine_every: 100
 prune_opa_abs: 1.0e-5
 
 # densify_grad_threshold
-grow_grad2d: 1e-4
+grow_grad2d: 1.0e-4 # different from R2Gaussian original cuz we use absgrad
 
 # r2-style densify_scale_threshold, expressed as ratio of world scale.
 # Runtime conversion:

@@ -1,0 +1,59 @@
+# Weights & Biases sweep for `r2gaussian` training (`scripts.train` + `--config-name r2gaussian`).
+#
+# Before launching:
+#   1. Replace `entity` and `project` with your W&B team and project.
+#   2. Set `exp.data_dir` to your preprocessed dataset (absolute path recommended).
+#   3. Optionally adjust `exp.result_dir` or sweep ranges below.
+#   4. `wandb login`
+#   5. Create the sweep and get an ID:
+#        wandb sweep sweep_r2gaussian.yaml
+#      Copy the printed `entity/project/sweep_id` into `sweep.sh` as `SWEEP_ID`.
+#
+# Sweep metric is `vol/psnr` = `vol_metrics["psnr"]` from 3-D evaluation (requires GT volume in data).
+# If your dataset has no GT volume, eval will not log this metric and the sweep has nothing to optimize.
+#
+# Search budget and "resolution":
+# - Uncomment `run_cap` below to set the maximum number of training runs (default if omitted: until you stop agents / UI).
+# - Fineness with `method: random` + `log_uniform_values`: narrower `min`/`max` = search a smaller
+#   range more densely (for a fixed `run_cap`); wider range = coarser exploration of a larger space.
+#   Increasing `run_cap` improves coverage of the same range.
+# - For an explicit grid of points, switch to `method: grid` and use `values: [ ... ]` lists; total
+#   runs = product of list lengths (can be large). For quantized steps on continuous params, see W&B
+#   `q_log_uniform_values` + `q` in their sweep config docs.
+
+entity: 810364379denveryi-eth-zurich
+project: gsplat2ct
+
+program: scripts/train.py
+method: random
+run_cap: 100
+metric:
+  name: vol/psnr
+  goal: maximize
+
+parameters:
+  exp.data_dir:
+    values:
+      - "/home/chengzyi/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone"
+  exp.result_dir:
+    values:
+      - "output/r2gaussian_like_sweep_grow_grad2d_lr_opacities"
+
+  strategy.grow_grad2d:
+    distribution: uniform
+    min: 5.0e-5
+    max: 2.0e-4
+
+  optim.lr_opacity:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 1.0e-2
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - scripts.train
+  - --config-name
+  - r2gaussian
+  - ${args_no_hyphens}
