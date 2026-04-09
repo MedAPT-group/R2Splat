@@ -93,6 +93,18 @@ def upper_tri_to_symmetric(h: torch.Tensor, d: int) -> torch.Tensor:
     return mat
 
 
+def _renormalize_quats(params: Params, eps: float = 1e-12) -> None:
+    """Project quaternions back to unit sphere in-place."""
+    p = params.get("quats")
+    if p is None:
+        return
+    q = p.data
+    if q.dim() != 2 or q.shape[-1] != 4:
+        return
+    q_norm = q.norm(dim=-1, keepdim=True).clamp_min(eps)
+    q.div_(q_norm)
+
+
 # ============================================================================
 # First-Order: Adam (Scheme A)
 # ============================================================================
@@ -118,6 +130,7 @@ class GS3DCTAdamOptimizer(FirstOrderOptimizerBase):
         super().__init__(params, config, PARAM_NAMES)
 
     def _apply_constraints(self) -> None:
+        _renormalize_quats(self.params)
         p = self.params.get("opacity")
         if p is not None:
             p.data.clamp_(min=0.0)
@@ -229,6 +242,7 @@ class GS3DCTNewtonOptimizer(NewtonOptimizerBase):
     # ---- constraints -------------------------------------------------------
 
     def _apply_constraints(self) -> None:
+        _renormalize_quats(self.params)
         p = self.params.get("opacity")
         if p is not None:
             p.data.clamp_(min=0.0)

@@ -6,9 +6,3 @@ lr:
   warmup_steps: 0
   min_factor: 0.1
 
-# Kept constant; ignored in first-order mode.
-damping:
-  type: "constant"
-  warmup_steps: 0
-  min_factor: 1.0
-

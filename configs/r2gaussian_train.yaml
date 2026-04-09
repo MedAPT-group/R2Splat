@@ -1,9 +1,9 @@
 # One-stop profile to mimic r2_gaussian settings.
 #
 # Usage:
-#   python -m scripts.train --config-name r2gaussian
+#   python -m scripts.train --config-name r2gaussian_train
 # or:
-#   python -m scripts.train --config-name r2gaussian exp=25_views
+#   python -m scripts.train --config-name r2gaussian_train exp=25_views
 
 defaults:
   - base

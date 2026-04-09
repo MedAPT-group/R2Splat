@@ -1,0 +1,19 @@
+# Validation profile aligned with r2gaussian training setup.
+#
+# Usage:
+#   python -m scripts.validate --config-name r2gaussian_val \\
+#       data_dir=/path/to/scene \\
+#       checkpoint_path=/path/to/ckpt.pt \\
+#       result_dir=/path/to/output
+
+defaults:
+  - validate
+  - _self_
+
+# Match r2gaussian training bounds (model.scale_min/scale_max).
+scale_min: 0.0005
+scale_max: 0.5
+
+# Persist prediction/GT arrays for downstream analysis.
+save_projection_npy: true
+save_volume_npy: true

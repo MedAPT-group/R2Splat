@@ -31,5 +31,6 @@ dist/
 # 日志文件
 *.log
 
-# ============== wandb和sweep ==============
+# ============== wandb / sweep ==============
 wandb/
+slurm*.out

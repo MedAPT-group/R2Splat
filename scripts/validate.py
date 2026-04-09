@@ -10,7 +10,7 @@ Usage::
 
 import json
 import os
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import hydra
 import numpy as np
@@ -21,9 +21,9 @@ from tqdm import tqdm
 
 from gsplat2ct.data.ctproj import CTImageDataset, CTImageParser
 from gsplat2ct.model.gaussian_params import GaussianParams
-from gsplat2ct.eval.evaluator import ProjectionEvaluator, VolumeEvaluator
+from gsplat2ct.eval.evaluator import VolumeEvaluator
 from gsplat2ct.eval.metric import metric_proj
-from gsplat2ct.vis.plotting import save_projection_comparison, save_volume_comparison
+from gsplat2ct.vis.plotting import save_volume_comparison
 
 
 def _evaluate_projections(
@@ -50,6 +50,8 @@ def _evaluate_projections(
 
     dataset.preload_to(device)
     psnr_list, ssim_list = [], []
+    pred_proj_all: List[np.ndarray] = []
+    gt_proj_all: List[np.ndarray] = []
 
     for idx in tqdm(range(len(dataset)), desc=f"Evaluating {split_name}"):
         batch = dataset.get_batch(idx)
@@ -89,6 +91,10 @@ def _evaluate_projections(
         psnr_list.append(float(m["psnr"].item()))
         ssim_list.append(float(m["ssim"].item()))
 
+        if bool(getattr(cfg, "save_projection_npy", True)) and split_name == "test":
+            pred_proj_all.append(pred[0].detach().cpu().numpy())
+            gt_proj_all.append(gt_sq[0].detach().cpu().numpy())
+
         if idx < cfg.eval_save_images_n:
             import matplotlib
             matplotlib.use("Agg")
@@ -122,6 +128,14 @@ def _evaluate_projections(
         "ssim_mean": float(np.mean(ssim_list)) if ssim_list else 0.0,
         "num_projections": len(psnr_list),
     }
+    if pred_proj_all and gt_proj_all:
+        pred_proj_path = os.path.join(output_dir, split_name, "pred_projections.npy")
+        gt_proj_path = os.path.join(output_dir, split_name, "gt_projections.npy")
+        np.save(pred_proj_path, np.stack(pred_proj_all, axis=0))
+        np.save(gt_proj_path, np.stack(gt_proj_all, axis=0))
+        metrics["pred_projection_npy"] = pred_proj_path
+        metrics["gt_projection_npy"] = gt_proj_path
+
     with open(os.path.join(output_dir, split_name, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
 
@@ -158,6 +172,7 @@ def main(cfg: DictConfig) -> None:
 
     # Projection evaluation
     print("[3/4] Evaluating projections...")
+    saved_arrays: Dict[str, str] = {}
     train_metrics = _evaluate_projections(
         params, trainset, cfg, device, "train", cfg.result_dir
     )
@@ -166,6 +181,10 @@ def main(cfg: DictConfig) -> None:
         test_metrics = _evaluate_projections(
             params, testset, cfg, device, "test", cfg.result_dir
         )
+        if "pred_projection_npy" in test_metrics:
+            saved_arrays["pred_projection_npy"] = test_metrics["pred_projection_npy"]
+        if "gt_projection_npy" in test_metrics:
+            saved_arrays["gt_projection_npy"] = test_metrics["gt_projection_npy"]
 
     # Volume evaluation
     print("[4/4] Volume evaluation...")
@@ -196,6 +215,14 @@ def main(cfg: DictConfig) -> None:
             os.path.join(vol_dir, "volume_comparison.png"),
             psnr_val=vol_metrics.get("psnr"),
         )
+
+        if bool(getattr(cfg, "save_volume_npy", True)):
+            pred_vol_path = os.path.join(vol_dir, "pred_volume.npy")
+            gt_vol_path = os.path.join(vol_dir, "gt_volume.npy")
+            np.save(pred_vol_path, pred_vol.detach().cpu().numpy())
+            np.save(gt_vol_path, vol_gt.detach().cpu().numpy())
+            saved_arrays["pred_volume_npy"] = pred_vol_path
+            saved_arrays["gt_volume_npy"] = gt_vol_path
     else:
         print("   GT volume or bbox not available, skipping.")
 
@@ -207,6 +234,7 @@ def main(cfg: DictConfig) -> None:
         "train_metrics": train_metrics,
         "test_metrics": test_metrics,
         "volume_metrics": vol_metrics,
+        "saved_arrays": saved_arrays,
     }
     with open(os.path.join(cfg.result_dir, "validation_report.json"), "w") as f:
         json.dump(report, f, indent=2)

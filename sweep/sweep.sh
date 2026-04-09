@@ -6,7 +6,7 @@
 #SBATCH --mem-per-cpu=8000M
 #SBATCH --ntasks=8
 #SBATCH --gres=gpu:1
-#SBATCH -o ./logs/sweep_agent_%j.log
+#SBATCH -o /home/chengzyi/myterminus/code/gsplat-3dgs2ct/logs/sweep_agent_%j.log
 
 set -euo pipefail
 
@@ -29,9 +29,9 @@ fi
 cd /home/chengzyi/myterminus/code/gsplat-3dgs2ct
 mkdir -p logs
 
-SWEEP_ID="${SWEEP_ID:-810364379denveryi-eth-zurich/gsplat2ct/xs5gzv7s}"
+SWEEP_ID="${SWEEP_ID:-810364379denveryi-eth-zurich/gsplat2ct/fl3pcltt}"
 if [[ "${SWEEP_ID}" == *"YOUR_"* ]] || [[ -z "${SWEEP_ID}" ]]; then
-  echo "ERROR: Set SWEEP_ID to the value from: wandb sweep sweep_r2gaussian.yaml" >&2
+  echo "ERROR: Set SWEEP_ID to the value from: wandb sweep sweep/sweep_r2gaussian.yaml" >&2
   exit 1
 fi
 

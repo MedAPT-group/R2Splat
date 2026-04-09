@@ -6,8 +6,8 @@
 #   3. Optionally adjust `exp.result_dir` or sweep ranges below.
 #   4. `wandb login`
 #   5. Create the sweep and get an ID:
-#        wandb sweep sweep_r2gaussian.yaml
-#      Copy the printed `entity/project/sweep_id` into `sweep.sh` as `SWEEP_ID`.
+#        wandb sweep sweep/sweep_r2gaussian.yaml
+#      Copy the printed `entity/project/sweep_id` into `sweep/sweep.sh` as `SWEEP_ID`.
 #
 # Sweep metric is `vol/psnr` = `vol_metrics["psnr"]` from 3-D evaluation (requires GT volume in data).
 # If your dataset has no GT volume, eval will not log this metric and the sweep has nothing to optimize.
@@ -26,7 +26,7 @@ project: gsplat2ct
 
 program: scripts/train.py
 method: random
-run_cap: 100
+run_cap: 150
 metric:
   name: vol/psnr
   goal: maximize
@@ -37,17 +37,27 @@ parameters:
       - "/home/chengzyi/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone"
   exp.result_dir:
     values:
-      - "output/r2gaussian_like_sweep_grow_grad2d_lr_opacities"
+      - "output/r2gaussian_like_sweep_6params"
 
-  strategy.grow_grad2d:
-    distribution: uniform
-    min: 5.0e-5
-    max: 2.0e-4
+  optim.lr_means:
+    distribution: log_uniform_values
+    min: 2.0e-4
+    max: 2.0e-3
+
+  optim.lr_quats:
+    distribution: log_uniform_values
+    min: 2.0e-4
+    max: 2.0e-2
+
+  optim.lr_scale_ori:
+    distribution: log_uniform_values
+    min: 2.0e-3
+    max: 5.0e-2
 
   optim.lr_opacity:
     distribution: log_uniform_values
-    min: 1.0e-6
-    max: 1.0e-2
+    min: 1.0e-4
+    max: 2.0e-3
 
 command:
   - ${env}

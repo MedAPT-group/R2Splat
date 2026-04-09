@@ -34,6 +34,49 @@ from gsplat2ct.vis.plotting import (
 from gsplat2ct.vis.video import ProjectionVideoRecorder, VideoVisConfig
 
 
+def _env_truthy(name: str, default: str = "") -> bool:
+    val = os.environ.get(name, default)
+    return val.lower() in {"1", "true", "yes", "on"}
+
+
+def _maybe_init_wandb(cfg: DictConfig) -> None:
+    """Initialize W&B run for both sweep and non-sweep launches.
+
+    Non-sweep runs can be enabled by setting `WANDB_ENABLE=1` (or by setting
+    `WANDB_PROJECT`). Sweep runs keep the existing `WANDB_SWEEP_ID` behavior.
+    """
+    try:
+        import wandb  # type: ignore
+    except ImportError:
+        return
+
+    if wandb.run is not None:
+        return
+
+    in_sweep = os.environ.get("WANDB_SWEEP_ID") is not None
+    enable_regular = _env_truthy("WANDB_ENABLE") or bool(os.environ.get("WANDB_PROJECT"))
+    if not in_sweep and not enable_regular:
+        return
+
+    init_kwargs: Dict[str, Any] = {}
+    if os.environ.get("WANDB_PROJECT"):
+        init_kwargs["project"] = os.environ["WANDB_PROJECT"]
+    if os.environ.get("WANDB_ENTITY"):
+        init_kwargs["entity"] = os.environ["WANDB_ENTITY"]
+    if os.environ.get("WANDB_GROUP"):
+        init_kwargs["group"] = os.environ["WANDB_GROUP"]
+    if os.environ.get("WANDB_RUN_NAME"):
+        init_kwargs["name"] = os.environ["WANDB_RUN_NAME"]
+    if os.environ.get("WANDB_TAGS"):
+        init_kwargs["tags"] = [t.strip() for t in os.environ["WANDB_TAGS"].split(",") if t.strip()]
+    if os.environ.get("WANDB_JOB_TYPE"):
+        init_kwargs["job_type"] = os.environ["WANDB_JOB_TYPE"]
+
+    # Store resolved config for easier run-to-run comparisons in W&B.
+    init_kwargs["config"] = OmegaConf.to_container(cfg, resolve=True)
+    wandb.init(**init_kwargs)
+
+
 # =====================================================================
 # Seeding
 # =====================================================================
@@ -211,14 +254,9 @@ def build_optimizer(cfg: DictConfig, params: Params):
 # =====================================================================
 
 def train(cfg: DictConfig) -> None:
-    # Weights & Biases (optional): used when running `wandb agent` for hyperparameter sweeps.
-    try:
-        import wandb  # type: ignore
-
-        if os.environ.get("WANDB_SWEEP_ID") is not None and wandb.run is None:
-            wandb.init()
-    except ImportError:
-        pass
+    # Weights & Biases is optional. It initializes automatically for sweeps,
+    # and can be enabled for normal runs through environment variables.
+    _maybe_init_wandb(cfg)
 
     device = torch.device(cfg.trainer.device if torch.cuda.is_available() else "cpu")
     # Always prepend a timestamp to output directory name.
@@ -457,6 +495,14 @@ def train(cfg: DictConfig) -> None:
             tv=f"{loss_tv:.4f}",
             N=gp.num_gaussians,
         )
+
+        try:
+            import wandb  # type: ignore
+
+            if wandb.run is not None:
+                wandb.log({"train/num_gaussians": float(gp.num_gaussians)}, step=step)
+        except ImportError:
+            pass
 
         video_recorder.maybe_record_step(step)
 

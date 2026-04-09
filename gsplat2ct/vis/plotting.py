@@ -22,29 +22,32 @@ def save_projection_triplet(
     value_range: Tuple[float, float] = (0.0, 1.0),
     title: Optional[str] = None,
 ) -> None:
-    """Save a single (GT, Pred, |Pred-GT|) visualization.
+    """Save a single (GT, Pred, Pred-GT) visualization.
 
     Args:
         pred: Predicted projection image (H, W).
         gt: Ground-truth projection image (H, W).
         path: Output image path.
-        value_range: Shared fixed range for all three panels.
+        value_range: Fixed range used by GT and Prediction panels.
         title: Optional figure title.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     pred_np = pred.detach().cpu().numpy()
     gt_np = gt.detach().cpu().numpy()
-    diff_np = np.abs(pred_np - gt_np)
+    diff_np = pred_np - gt_np
     vmin, vmax = float(value_range[0]), float(value_range[1])
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     panels = [
         (gt_np, "Ground Truth"),
         (pred_np, "Prediction"),
-        (diff_np, "Abs Difference"),
+        (diff_np, "Difference (Pred-GT)"),
     ]
-    for ax, (img, panel_title) in zip(axes, panels):
-        im = ax.imshow(img, cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal")
+    for idx, (ax, (img, panel_title)) in enumerate(zip(axes, panels)):
+        if idx < 2:
+            im = ax.imshow(img, cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal")
+        else:
+            im = ax.imshow(img, cmap="seismic", vmin=-0.1, vmax=0.1, aspect="equal")
         ax.set_title(panel_title)
         ax.set_xticks([])
         ax.set_yticks([])
@@ -82,7 +85,7 @@ def save_projection_comparison(
     for i, (pred_t, gt_t) in enumerate(pairs):
         pred = pred_t.detach().cpu().numpy()
         gt = gt_t.detach().cpu().numpy()
-        diff = np.abs(pred - gt)
+        diff = pred - gt
 
         vmin = float(min(pred.min(), gt.min()))
         vmax = float(max(pred.max(), gt.max()))
@@ -92,7 +95,7 @@ def save_projection_comparison(
 
         axes[0].imshow(pred, cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal")
         axes[1].imshow(gt, cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal")
-        im = axes[2].imshow(diff, cmap="viridis", vmin=diff.min(), vmax=diff.max(), aspect="equal")
+        im = axes[2].imshow(diff, cmap="seismic", vmin=-0.1, vmax=0.1, aspect="equal")
         fig.colorbar(im, cax=cbar_ax)
 
         axes[0].set_ylabel(f"View {i}", fontsize=10)
@@ -147,11 +150,6 @@ def save_volume_comparison(
 
     vmin = min(gv.min(), pv.min())
     vmax = max(gv.max(), pv.max())
-    diff_absmax = max(
-        max(abs(s.min()) for s in slices_diff),
-        max(abs(s.max()) for s in slices_diff),
-    )
-
     fig, axes = plt.subplots(3, 3, figsize=(18, 16))
     axis_names = ["W-axis (Sagittal)", "D-axis (Coronal)", "H-axis (Axial)"]
     row_names = ["Ground Truth", "Prediction", "Difference"]
@@ -166,8 +164,8 @@ def save_volume_comparison(
         axes[1, col].axis("off")
         plt.colorbar(im1, ax=axes[1, col], fraction=0.046, pad=0.04)
 
-        im2 = axes[2, col].imshow(slices_diff[col], cmap="viridis",
-                                   vmin=-diff_absmax, vmax=diff_absmax)
+        im2 = axes[2, col].imshow(slices_diff[col], cmap="seismic",
+                       vmin=-0.1, vmax=0.1)
         axes[2, col].axis("off")
         plt.colorbar(im2, ax=axes[2, col], fraction=0.046, pad=0.04)
 
