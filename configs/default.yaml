@@ -3,6 +3,7 @@
 defaults:
   - base
   - model: default
+  - init: default
   - trainer: default
   - optim: default
   - schedule: none

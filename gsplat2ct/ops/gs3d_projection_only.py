@@ -1061,8 +1061,13 @@ class GS3DProjectionOnlyAutograd(SecondForwardBackwardBase):
                 h_quats_out[:, idx] = h_qq[:, i, j]
                 idx += 1
 
-        # h_scale_ori: diagonal of 3x3
-        h_scale_ori_out = torch.stack([h_ss[:, i, i] for i in range(3)], dim=-1)
+        # h_scale_ori: upper-tri of 3x3 -> 6 elements
+        h_scale_ori_out = torch.zeros(N, 6, dtype=dtype, device=device)
+        idx = 0
+        for i in range(3):
+            for j in range(i, 3):
+                h_scale_ori_out[:, idx] = h_ss[:, i, j]
+                idx += 1
 
         # h_quats_scale_ori: 4x3 row-major → 12 elements
         h_quats_scale_ori_out = h_qs.reshape(N, 12)

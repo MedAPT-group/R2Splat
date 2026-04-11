@@ -239,6 +239,14 @@ def test_backward2(tag, N=47, C=3, img_dim0=31, img_dim1=43,
                 print(f"    [{coords}]: ag={v1:.6e}, cuda={v2:.6e}, diff={top_vals[i].item():.6e}")
         return ok
 
+    def scale_utri_diag(t: torch.Tensor) -> torch.Tensor:
+        # Upper-tri order for 3x3: [00, 01, 02, 11, 12, 22]
+        return t[:, [0, 3, 5]]
+
+    def scale_utri_cross(t: torch.Tensor) -> torch.Tensor:
+        # Upper-tri off-diagonals: [01, 02, 12]
+        return t[:, [1, 2, 4]]
+
     ok = True
 
     print("\n--- First-Order Gradients ---")
@@ -248,6 +256,17 @@ def test_backward2(tag, N=47, C=3, img_dim0=31, img_dim1=43,
     print("\n--- Self Hessians ---")
     for key in ['means', 'quats', 'scale_ori', 'opacity']:
         ok &= compare(f"h_{key}", ag_hess.param_hess.get(key), cuda_hess.param_hess.get(key))
+
+    # Explicitly verify full scale_ori self-Hessian contents.
+    ag_h_scale = ag_hess.param_hess.get('scale_ori')
+    cuda_h_scale = cuda_hess.param_hess.get('scale_ori')
+    if ag_h_scale is not None and cuda_h_scale is not None:
+        if ag_h_scale.shape[-1] != 6 or cuda_h_scale.shape[-1] != 6:
+            print(f"  h_scale_ori expected upper-tri length 6, got ag={list(ag_h_scale.shape)} cuda={list(cuda_h_scale.shape)} ✗")
+            ok = False
+        else:
+            ok &= compare("h_scale_ori_diag", scale_utri_diag(ag_h_scale), scale_utri_diag(cuda_h_scale))
+            ok &= compare("h_scale_ori_cross", scale_utri_cross(ag_h_scale), scale_utri_cross(cuda_h_scale))
 
     print("\n--- Cross-Term Hessians ---")
     for key in ['quats_scale_ori', 'quats_means', 'quats_opacity',

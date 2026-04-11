@@ -173,10 +173,23 @@ def resolve_gpu_slots(requested: int) -> List[str]:
     return [str(i) for i in range(requested)]
 
 
-def should_skip_output(path: Path) -> bool:
-    if not path.exists() or not path.is_dir():
+def should_skip_output(subset_result_dir: Path, sample_name: str) -> bool:
+    if not subset_result_dir.exists() or not subset_result_dir.is_dir():
         return False
-    return any(path.iterdir())
+
+    # Backward compatibility: if legacy non-timestamped sample dir contains outputs.
+    legacy_dir = subset_result_dir / sample_name
+    if legacy_dir.exists() and legacy_dir.is_dir() and any(legacy_dir.iterdir()):
+        return True
+
+    # Current behavior: outputs are written into sibling dirs like
+    # "YYYYmmdd_HHMMSS_<sample_name>".
+    pattern = f"*_{sample_name}"
+    for candidate in subset_result_dir.glob(pattern):
+        if candidate.is_dir() and any(candidate.iterdir()):
+            return True
+
+    return False
 
 
 def build_worker_script(
@@ -287,9 +300,11 @@ def main() -> None:
     # Apply skipping policy before enqueueing.
     filtered_jobs: List[SampleJob] = []
     for job in jobs:
-        out_dir = result_root / job.subset_name / job.sample_name
-        if args.skip_finished and should_skip_output(out_dir):
-            print(f"[skip] {job.subset_name}/{job.sample_name} -> existing output at {out_dir}")
+        subset_out_dir = result_root / job.subset_name
+        if args.skip_finished and should_skip_output(subset_out_dir, job.sample_name):
+            print(
+                f"[skip] {job.subset_name}/{job.sample_name} -> existing timestamped output under {subset_out_dir}"
+            )
             continue
         filtered_jobs.append(job)
 
@@ -330,7 +345,6 @@ def main() -> None:
             start = time.time()
             sample_key = f"{job.subset_name}/{job.sample_name}"
             out_dir = result_root / job.subset_name / job.sample_name
-            out_dir.mkdir(parents=True, exist_ok=True)
 
             log_file = logs_run_dir / f"gpu{gpu_slot_idx}_{job.subset_name}_{job.sample_name}.log"
 

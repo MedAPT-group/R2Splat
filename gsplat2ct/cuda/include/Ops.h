@@ -1107,7 +1107,7 @@ parameter_transform_bwd_tensor(
  *
  * @return std::tuple with:
  *   - v_quats [N, 4], v_scale_ori [N, 3]   (first-order)
- *   - h_quats [N, 10], h_scale_ori [N, 3], h_quats_scale_ori [N, 12]  (theta-theta Hessians)
+ *   - h_quats [N, 10], h_scale_ori [N, 6], h_quats_scale_ori [N, 12]  (theta-theta Hessians)
  *   - h_quats_means [N, 12], h_quats_opacity [N, 4]   (quat cross-Hessians)
  *   - h_scale_ori_means [N, 9], h_scale_ori_opacity [N, 3]  (scale cross-Hessians)
  */

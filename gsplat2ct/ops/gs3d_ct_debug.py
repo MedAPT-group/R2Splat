@@ -729,7 +729,14 @@ class GS3DCTDebugAutograd(SecondForwardBackwardBase):
                 h_quats_out[:, idx] = h_qq[:, i, j]
                 idx += 1
 
-        h_scale_ori_out = torch.stack([h_ss[:, i, i] for i in range(3)], dim=-1)
+        h_scale_ori_out = torch.stack([
+            h_ss[:, 0, 0],
+            h_ss[:, 0, 1],
+            h_ss[:, 0, 2],
+            h_ss[:, 1, 1],
+            h_ss[:, 1, 2],
+            h_ss[:, 2, 2],
+        ], dim=-1)
         h_quats_scale_ori_out = h_qs.reshape(N, 12)
         h_quats_means_out = h_pq.transpose(-1, -2).reshape(N, 12)
         h_scale_ori_means_out = h_ps.transpose(-1, -2).reshape(N, 9)

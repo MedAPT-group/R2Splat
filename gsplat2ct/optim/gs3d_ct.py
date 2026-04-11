@@ -7,7 +7,7 @@ formats produced by ``GS3DCTLossCUDA.forward_backward2``.
 Parameter groups and their Hessian formats:
     means:     grad (N,3),  self-hess (N,6)  upper-tri 3×3
     quats:     grad (N,4),  self-hess (N,10) upper-tri 4×4
-    scale_ori: grad (N,3),  self-hess (N,3)  diagonal 3×3
+    scale_ori: grad (N,3),  self-hess (N,6)  upper-tri 3×3
     opacity:   grad (N,),   self-hess (N,)   scalar
 
 Cross-Hessian map (name -> shape -> semantic):
@@ -62,6 +62,7 @@ CROSS_HESS_NAMES = [
 _DIAG_INDICES = {
     "means": [0, 3, 5],
     "quats": [0, 4, 7, 9],
+    "scale_ori": [0, 3, 5],
 }
 
 # Cross-Hessian specification: (row_param, col_param, n_rows, n_cols)
@@ -197,7 +198,7 @@ class GS3DCTNewtonOptimizer(NewtonOptimizerBase):
         elif name == "quats":
             return upper_tri_to_symmetric(h, 4)
         elif name == "scale_ori":
-            return torch.diag_embed(h)           # (N,3) → (N,3,3)
+            return upper_tri_to_symmetric(h, 3)
         elif name == "opacity":
             return h.unsqueeze(-1).unsqueeze(-1)  # (N,) → (N,1,1)
         raise ValueError(f"Unknown parameter: {name}")

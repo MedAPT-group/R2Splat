@@ -197,7 +197,7 @@ parameter_transform_bwd2_tensor(
     torch::Tensor v_quats = torch::empty({N, 4}, quats.options());
     torch::Tensor v_scale_ori = torch::empty({N, 3}, quats.options());
     torch::Tensor h_quats = torch::empty({N, 10}, quats.options());
-    torch::Tensor h_scale_ori = torch::empty({N, 3}, quats.options());
+    torch::Tensor h_scale_ori = torch::empty({N, 6}, quats.options());
     torch::Tensor h_quats_scale_ori = torch::empty({N, 12}, quats.options());
     torch::Tensor h_quats_means = torch::empty({N, 12}, quats.options());
     torch::Tensor h_quats_opacity = torch::empty({N, 4}, quats.options());

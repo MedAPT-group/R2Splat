@@ -5,6 +5,15 @@ device: "cuda:0"
 max_steps: 30000
 batch_size: 1
 
+# View sampling strategy for projection batches.
+# random: original random cycling without replacement.
+# evenly_spaced: sample each batch to cover angles as evenly as possible.
+angle_sampling_strategy: "random"
+
+# Unit of meta_data angle values.
+# auto: infer radians/degrees from value range.
+angle_unit: "auto"
+
 save_steps: [4999, 9999, 19999, 29999]
 
 # Image loss settings

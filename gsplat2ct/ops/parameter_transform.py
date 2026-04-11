@@ -294,7 +294,7 @@ class ParameterTransformCUDA(SecondForwardBackwardBase):
             HessResult with:
                 param_hess:
                     - 'quats': H_{q,q} upper-tri (N, 10)
-                    - 'scale_ori': H_{s,s} diagonal (N, 3)
+                    - 'scale_ori': H_{s,s} upper-tri (N, 6)
                 cross_hess:
                     - 'quats_scale_ori': H_{q,s} (N, 12)
                     - 'quats_means': H_{q,mean} (N, 12)
@@ -651,8 +651,13 @@ class ParameterTransformAutograd(SecondForwardBackwardBase):
                 h_quats[:, idx] = full_qq[:, i, j]
                 idx += 1
 
-        # h_scale_ori: diagonal of 3x3
-        h_scale_ori = torch.stack([full_ss[:, i, i] for i in range(3)], dim=-1)
+        # h_scale_ori: upper-tri of 3x3 -> 6 elements
+        h_scale_ori = torch.zeros(N, 6, dtype=dtype, device=device)
+        idx = 0
+        for i in range(3):
+            for j in range(i, 3):
+                h_scale_ori[:, idx] = full_ss[:, i, j]
+                idx += 1
 
         # h_quats_scale_ori: 4x3 row-major -> 12 elements
         h_quats_scale_ori = full_qs.reshape(N, 12)

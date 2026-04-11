@@ -76,8 +76,9 @@
  * d^2(C_ij)/d(q_a)d(so_m):
  *   2 * s_m * s_m' * (dR_im/dqa * R_jm + R_im * dR_jm/dqa)
  *
- * d^2(C_ij)/d(so_m)d(so_n) = 0  for m != n
- *   (scale Hessian is diagonal)
+ * d^2(C_ij)/d(so_m)d(so_n) = 0  for m != n  (curvature term)
+ *   Note: full H_{s,s} can still have non-zero off-diagonal terms from
+ *   the Gauss-Newton term J^T H J.
  *
  * =========================================================================
  * Derivatives of R w.r.t. q
@@ -274,7 +275,7 @@ __global__ void parameter_transform_bwd2_kernel(
     S* __restrict__ v_scale_ori,             // [N, 3]
     // outputs: theta-theta Hessians
     S* __restrict__ h_quats,                 // [N, 10] upper-tri 4x4
-    S* __restrict__ h_scale_ori,             // [N, 3]  diagonal
+    S* __restrict__ h_scale_ori,             // [N, 6]  upper-tri 3x3
     S* __restrict__ h_quats_scale_ori,       // [N, 12] 4x3 row-major
     // outputs: theta-psi cross Hessians
     S* __restrict__ h_quats_means,           // [N, 12] 4x3 row-major
@@ -504,10 +505,15 @@ __global__ void parameter_transform_bwd2_kernel(
         }
     }
 
-    // h_scale_ori: diagonal of so-so block = 3 elements
-    S* hs_ptr = h_scale_ori + idx * 3;
-    for (int m = 0; m < 3; ++m) {
-        hs_ptr[m] = H_theta[(4+m) * 7 + (4+m)];
+    // h_scale_ori: upper-tri of so-so block = 6 elements
+    S* hs_ptr = h_scale_ori + idx * 6;
+    {
+        int out_idx = 0;
+        for (int i = 0; i < 3; ++i) {
+            for (int j = i; j < 3; ++j) {
+                hs_ptr[out_idx++] = H_theta[(4+i) * 7 + (4+j)];
+            }
+        }
     }
 
     // h_quats_scale_ori: q-so cross block 4x3 row-major = 12 elements

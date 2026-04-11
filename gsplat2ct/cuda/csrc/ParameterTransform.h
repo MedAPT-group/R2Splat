@@ -66,7 +66,7 @@
  *   - v_quats [N, 4]:             first-order gradient dL/d(quats)
  *   - v_scale_ori [N, 3]:         first-order gradient dL/d(scale_ori)
  *   - h_quats [N, 10]:            H_{q,q} upper-tri of 4x4
- *   - h_scale_ori [N, 3]:         H_{s,s} diagonal (scale Hessian is diagonal)
+ *   - h_scale_ori [N, 6]:         H_{s,s} upper-tri of 3x3
  *   - h_quats_scale_ori [N, 12]:  H_{q,s} 4x3 row-major
  *   - h_quats_means [N, 12]:      H_{q,mean} 4x3 row-major
  *   - h_quats_opacity [N, 4]:     H_{q,opacity}
@@ -197,7 +197,7 @@ void launch_parameter_transform_bwd(
  * @param v_quats           Output dL/d(quats) [N, 4]
  * @param v_scale_ori       Output dL/d(scale_ori) [N, 3]
  * @param h_quats           Output H_{q,q} upper-tri [N, 10]
- * @param h_scale_ori       Output H_{s,s} diagonal [N, 3]
+ * @param h_scale_ori       Output H_{s,s} upper-tri [N, 6]
  * @param h_quats_scale_ori Output H_{q,s} [N, 12] 4x3 row-major
  * @param h_quats_means     Output H_{q,mean} [N, 12] 4x3 row-major
  * @param h_quats_opacity   Output H_{q,opacity} [N, 4]
@@ -224,7 +224,7 @@ void launch_parameter_transform_bwd2(
     S* __restrict__ v_scale_ori,             // [N, 3]
     // outputs: theta-theta Hessians
     S* __restrict__ h_quats,                 // [N, 10]
-    S* __restrict__ h_scale_ori,             // [N, 3]
+    S* __restrict__ h_scale_ori,             // [N, 6]
     S* __restrict__ h_quats_scale_ori,       // [N, 12]
     // outputs: theta-psi cross Hessians
     S* __restrict__ h_quats_means,           // [N, 12]

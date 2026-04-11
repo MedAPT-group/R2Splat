@@ -14,7 +14,7 @@ Scale activation in our kernel:
 """
 
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -121,6 +121,67 @@ class GaussianParams:
         quats = torch.zeros((n_points, 4), device=dev)
         quats[:, 0] = 1.0
 
+        opacity = opa_vals.to(dev)
+
+        gp = cls(
+            means=xyz_dev,
+            quats=quats,
+            scale_ori=scale_ori,
+            opacity=opacity,
+            device=dev,
+        )
+
+        if bbox is not None:
+            gp.crop_to_bbox(bbox)
+        return gp
+
+    @classmethod
+    def from_points(
+        cls,
+        points: Union[np.ndarray, torch.Tensor],
+        *,
+        scale_min: float = 0.001,
+        scale_max: float = 1.0,
+        global_scale: float = 1.0,
+        init_opa_scale: float = 1.0,
+        init_scale_multiplier: float = 0.5,
+        bbox: Optional[torch.Tensor] = None,
+        device: str = "cuda",
+    ) -> "GaussianParams":
+        """Create Gaussian parameters from sampled points ``(N, >=4)``.
+
+        Args:
+            points: Array/tensor with columns ``(x, y, z, opacity, ...)``.
+        """
+        dev = torch.device(device)
+        if isinstance(points, np.ndarray):
+            data = points
+        elif isinstance(points, torch.Tensor):
+            data = points.detach().cpu().numpy()
+        else:
+            raise TypeError(f"Unsupported points type: {type(points)}")
+
+        if data.ndim != 2 or data.shape[1] < 4:
+            raise ValueError("points must have shape (N, >=4) with columns (x, y, z, opacity)")
+
+        xyz = torch.from_numpy(data[:, :3]).float() * float(global_scale)
+        opa_vals = torch.from_numpy(data[:, 3]).float()
+        opa_vals = (opa_vals * float(init_opa_scale)).clamp(min=1e-6, max=10.0)
+
+        n_points = xyz.shape[0]
+        xyz_dev = xyz.to(dev).contiguous()
+
+        nn_dist = cls._compute_nn_distances(xyz_dev)
+        nn_dist = nn_dist.clamp_min(2e-4)
+        target_scale = nn_dist * float(init_scale_multiplier)
+
+        target_scale_3 = target_scale.unsqueeze(-1).expand(-1, 3)
+        scale_ori = cls._inverse_scale_activation(
+            target_scale_3, scale_min, scale_max
+        )
+
+        quats = torch.zeros((n_points, 4), device=dev)
+        quats[:, 0] = 1.0
         opacity = opa_vals.to(dev)
 
         gp = cls(

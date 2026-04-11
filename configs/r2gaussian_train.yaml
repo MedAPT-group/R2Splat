@@ -12,6 +12,7 @@ defaults:
   - optim: r2gaussian_adam
   - schedule: r2gaussian_exp
   - exp: 25_views
+  - init: r2gaussian
   - strategy: r2gaussian
   - vis: r2gaussian
   - _self_

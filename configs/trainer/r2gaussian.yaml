@@ -4,6 +4,13 @@ device: "cuda:0"
 max_steps: 30000
 batch_size: 1
 
+# View sampling strategy for projection batches.
+# Keep random as default to preserve existing first-order behavior.
+angle_sampling_strategy: "random"
+
+# Unit of meta_data angle values.
+angle_unit: "auto"
+
 save_steps: [999, 5999, 9999, 19999, 29999]
 
 # Image loss settings

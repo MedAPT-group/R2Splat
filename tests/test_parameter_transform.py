@@ -584,9 +584,16 @@ def test_bwd2_cuda_vs_autograd_ground_truth(
             idx += 1
     compare("h_quats (upper-tri 4x4)", hess_c.param_hess['quats'], h_qq_utri)
 
-    # h_scale_ori: diagonal of 3x3
-    h_ss_diag = torch.stack([gt['h_ss'][:, i, i] for i in range(3)], dim=-1)
-    compare("h_scale_ori (diagonal)", hess_c.param_hess['scale_ori'], h_ss_diag)
+    # h_scale_ori: upper-tri of 3x3 -> 6 elements
+    h_ss_utri = torch.stack([
+        gt['h_ss'][:, 0, 0],
+        gt['h_ss'][:, 0, 1],
+        gt['h_ss'][:, 0, 2],
+        gt['h_ss'][:, 1, 1],
+        gt['h_ss'][:, 1, 2],
+        gt['h_ss'][:, 2, 2],
+    ], dim=-1)
+    compare("h_scale_ori (upper-tri 3x3)", hess_c.param_hess['scale_ori'], h_ss_utri)
 
     # Check that off-diagonal of h_ss is small (should be ~0 by design)
     h_ss_offdiag_max = 0.0
@@ -711,8 +718,15 @@ def test_bwd2_autograd_op_vs_ground_truth(
     compare("h_quats (upper-tri)", hess_a.param_hess['quats'], h_qq_utri)
 
     # h_scale_ori
-    h_ss_diag = torch.stack([gt['h_ss'][:, i, i] for i in range(3)], dim=-1)
-    compare("h_scale_ori (diagonal)", hess_a.param_hess['scale_ori'], h_ss_diag)
+    h_ss_utri = torch.stack([
+        gt['h_ss'][:, 0, 0],
+        gt['h_ss'][:, 0, 1],
+        gt['h_ss'][:, 0, 2],
+        gt['h_ss'][:, 1, 1],
+        gt['h_ss'][:, 1, 2],
+        gt['h_ss'][:, 2, 2],
+    ], dim=-1)
+    compare("h_scale_ori (upper-tri 3x3)", hess_a.param_hess['scale_ori'], h_ss_utri)
 
     # h_quats_scale_ori
     compare("h_quats_scale_ori", hess_a.cross_hess['quats_scale_ori'], gt['h_qs'].reshape(N, 12))

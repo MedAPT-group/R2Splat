@@ -10,6 +10,7 @@ Usage::
 
 import os
 import random
+import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,6 +23,7 @@ from tqdm import tqdm
 
 from gsplat2ct.data.ctproj import CTImageDataset, CTImageParser
 from gsplat2ct.model.gaussian_params import GaussianParams
+from gsplat2ct.model.ct_initializer import initialize_from_metadata
 from gsplat2ct.ops.data import Params, Data, Config, ForwardResult, GradResult, HessResult
 from gsplat2ct.ops.gs3d_ct_train import GS3DCTLossCUDA
 from gsplat2ct.optim.base import HessianMode, SignalStrategy
@@ -202,6 +204,112 @@ def sample_tv_subvolume(
 
 
 # =====================================================================
+# View batch sampling
+# =====================================================================
+
+def _angles_to_radians(
+    angles: torch.Tensor,
+    angle_unit: str,
+) -> torch.Tensor:
+    """Convert angle values to radians and fold to [0, 2pi)."""
+    unit = angle_unit.lower()
+    if unit not in {"auto", "radian", "degree"}:
+        raise ValueError(f"Unsupported trainer.angle_unit={angle_unit}")
+
+    if unit == "auto":
+        max_abs = float(angles.abs().max().item()) if angles.numel() > 0 else 0.0
+        # Most CT metadata in this codebase stores radians in [0, 2pi).
+        # If values are larger than 2pi but within ~360, treat as degrees.
+        unit = "radian" if max_abs <= (2.0 * math.pi + 1e-3) else "degree"
+
+    if unit == "degree":
+        angles = torch.deg2rad(angles)
+
+    two_pi = 2.0 * math.pi
+    return torch.remainder(angles, two_pi)
+
+
+def _sample_random_batch_indices(
+    *,
+    num_views: int,
+    batch_size: int,
+    shuffle_perm: torch.Tensor,
+    perm_cursor: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """Existing random-without-replacement cycling behavior."""
+    if perm_cursor + batch_size <= num_views:
+        batch_indices = shuffle_perm[perm_cursor:perm_cursor + batch_size]
+        perm_cursor += batch_size
+    else:
+        remain = num_views - perm_cursor
+        head = shuffle_perm[perm_cursor:] if remain > 0 else torch.empty(0, dtype=torch.long, device=device)
+        shuffle_perm = torch.randperm(num_views, device=device)
+        take = batch_size - remain
+        tail = shuffle_perm[:take]
+        perm_cursor = take
+        batch_indices = torch.cat([head, tail], dim=0)
+    return batch_indices, shuffle_perm, perm_cursor
+
+
+def _sample_evenly_spaced_angle_batch_indices(
+    angles_rad: torch.Tensor,
+    batch_size: int,
+) -> torch.Tensor:
+    """Sample views whose angles are as evenly spread over [0, 2pi) as possible.
+
+    Strategy:
+    1. Draw a random phase offset.
+    2. Split the circle into ``batch_size`` equal angular bins.
+    3. Pick one view per bin (random in-bin if available; otherwise nearest to bin center).
+    """
+    num_views = int(angles_rad.numel())
+    device = angles_rad.device
+    if num_views == 0:
+        raise RuntimeError("No views available for angle-based sampling")
+
+    if batch_size <= 1:
+        return torch.randint(0, num_views, (1,), device=device)
+
+    if batch_size > num_views:
+        core = _sample_evenly_spaced_angle_batch_indices(angles_rad, num_views)
+        extra_idx = torch.randint(0, num_views, (batch_size - num_views,), device=device)
+        return torch.cat([core, core.index_select(0, extra_idx)], dim=0)
+
+    two_pi = 2.0 * math.pi
+    step = two_pi / float(batch_size)
+    phase = float(torch.rand(1, device=device).item() * two_pi)
+
+    selected: List[int] = []
+    selected_mask = torch.zeros(num_views, dtype=torch.bool, device=device)
+
+    for i in range(batch_size):
+        start = (phase + i * step) % two_pi
+        end = (start + step) % two_pi
+        if start <= end:
+            in_bin = (angles_rad >= start) & (angles_rad < end)
+        else:
+            in_bin = (angles_rad >= start) | (angles_rad < end)
+
+        cand = torch.nonzero(in_bin & (~selected_mask), as_tuple=False).flatten()
+        if cand.numel() > 0:
+            pick = int(cand[torch.randint(0, cand.numel(), (1,), device=device)].item())
+            selected.append(pick)
+            selected_mask[pick] = True
+            continue
+
+        center = (start + 0.5 * step) % two_pi
+        diff = torch.abs(angles_rad - center)
+        circ_dist = torch.minimum(diff, two_pi - diff)
+        penalty = selected_mask.to(circ_dist.dtype) * 1e6
+        pick = int(torch.argmin(circ_dist + penalty).item())
+        selected.append(pick)
+        selected_mask[pick] = True
+
+    return torch.tensor(selected, dtype=torch.long, device=device)
+
+
+# =====================================================================
 # Optimizer construction
 # =====================================================================
 
@@ -311,16 +419,45 @@ def train(cfg: DictConfig) -> None:
 
     # ---- Parameters ----
     print("[2/5] Initializing Gaussian parameters...")
-    gp = GaussianParams.from_data_dir(
-        cfg.exp.data_dir,
-        scale_min=cfg.model.scale_min,
-        scale_max=cfg.model.scale_max,
-        global_scale=cfg.model.global_scale,
-        init_opa_scale=cfg.model.init_opa_scale,
-        init_scale_multiplier=cfg.model.init_scale_multiplier,
-        bbox=bbox,
-        device=str(device),
-    )
+    init_source = str(getattr(cfg.init, "source", "online")).lower()
+    if init_source not in {"online", "file"}:
+        raise ValueError("init.source must be one of [online, file]")
+
+    if init_source == "online":
+        init_result = initialize_from_metadata(
+            data_dir=cfg.exp.data_dir,
+            scanner_cfg=parser.get_scanner_params(),
+            proj_train=parser.get_proj_info("train"),
+            recon_method=str(cfg.init.recon_method),
+            n_points=int(cfg.init.n_points),
+            density_thresh=float(cfg.init.density_thresh),
+            density_rescale=float(cfg.init.density_rescale),
+            random_density_max=float(cfg.init.random_density_max),
+            sart_n_iter=int(cfg.init.sart_n_iter),
+        )
+        gp = GaussianParams.from_points(
+            init_result.sampled_points_n4,
+            scale_min=cfg.model.scale_min,
+            scale_max=cfg.model.scale_max,
+            global_scale=cfg.model.global_scale,
+            init_opa_scale=cfg.model.init_opa_scale,
+            init_scale_multiplier=cfg.model.init_scale_multiplier,
+            bbox=bbox,
+            device=str(device),
+        )
+        if init_result.coarse_volume_wdh is not None:
+            print(f"   Coarse volume reconstructed: {tuple(init_result.coarse_volume_wdh.shape)}")
+    else:
+        gp = GaussianParams.from_data_dir(
+            cfg.exp.data_dir,
+            scale_min=cfg.model.scale_min,
+            scale_max=cfg.model.scale_max,
+            global_scale=cfg.model.global_scale,
+            init_opa_scale=cfg.model.init_opa_scale,
+            init_scale_multiplier=cfg.model.init_scale_multiplier,
+            bbox=bbox,
+            device=str(device),
+        )
     params = gp.to_params()
     print(f"   {gp.num_gaussians} Gaussians initialized")
 
@@ -373,6 +510,37 @@ def train(cfg: DictConfig) -> None:
     max_steps = cfg.trainer.max_steps
     batch_size = int(cfg.trainer.batch_size)
     num_views = len(trainset)
+
+    angle_strategy_raw = str(getattr(cfg.trainer, "angle_sampling_strategy", "random")).lower()
+    angle_strategy_alias = {
+        "random": "random",
+        "rand": "random",
+        "evenly_spaced": "evenly_spaced",
+        "even": "evenly_spaced",
+        "stratified": "evenly_spaced",
+    }
+    if angle_strategy_raw not in angle_strategy_alias:
+        raise ValueError(
+            f"Unsupported trainer.angle_sampling_strategy={angle_strategy_raw}. "
+            "Use one of: random, evenly_spaced."
+        )
+    angle_strategy = angle_strategy_alias[angle_strategy_raw]
+    angle_unit = str(getattr(cfg.trainer, "angle_unit", "auto")).lower()
+
+    angle_values = torch.tensor(
+        [float(info["angle"]) for info in trainset.proj_info],
+        dtype=torch.float32,
+        device=device,
+    )
+    angle_values_rad = _angles_to_radians(angle_values, angle_unit)
+
+    print(
+        "   View sampling: "
+        f"strategy={angle_strategy}, "
+        f"batch_size={batch_size}, "
+        f"angle_unit={angle_unit}"
+    )
+
     shuffle_perm = torch.randperm(num_views, device=device)
     perm_cursor = 0
     progress = tqdm(range(max_steps), desc="Training")
@@ -385,17 +553,22 @@ def train(cfg: DictConfig) -> None:
 
     for step in progress:
         scheduler.step(step, max_steps)
-        if perm_cursor + batch_size <= num_views:
-            batch_indices = shuffle_perm[perm_cursor:perm_cursor + batch_size]
-            perm_cursor += batch_size
+
+        # Keep the existing random path unchanged for batch_size==1 training.
+        if angle_strategy == "random" or batch_size <= 1:
+            batch_indices, shuffle_perm, perm_cursor = _sample_random_batch_indices(
+                num_views=num_views,
+                batch_size=batch_size,
+                shuffle_perm=shuffle_perm,
+                perm_cursor=perm_cursor,
+                device=device,
+            )
         else:
-            remain = num_views - perm_cursor
-            head = shuffle_perm[perm_cursor:] if remain > 0 else torch.empty(0, dtype=torch.long, device=device)
-            shuffle_perm = torch.randperm(num_views, device=device)
-            take = batch_size - remain
-            tail = shuffle_perm[:take]
-            perm_cursor = take
-            batch_indices = torch.cat([head, tail], dim=0)
+            batch_indices = _sample_evenly_spaced_angle_batch_indices(
+                angle_values_rad,
+                batch_size,
+            )
+
         raw_batch = trainset.get_batch(batch_indices)
 
         # Image dimensions from the batch

@@ -1498,7 +1498,7 @@ def parameter_transform_bwd2(
         - v_quats (N, 4): First-order gradient
         - v_scale_ori (N, 3): First-order gradient
         - h_quats (N, 10): H_{q,q} upper-tri 4x4
-        - h_scale_ori (N, 3): H_{s,s} diagonal
+        - h_scale_ori (N, 6): H_{s,s} upper-tri 3x3
         - h_quats_scale_ori (N, 12): H_{q,s} 4x3 row-major
         - h_quats_means (N, 12): H_{q,mean} 4x3 row-major
         - h_quats_opacity (N, 4): H_{q,opacity}
