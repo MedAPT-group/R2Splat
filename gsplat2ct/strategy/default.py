@@ -37,6 +37,22 @@ class StrategyOutput:
     split_mask: torch.Tensor  # (N,) bool
 
 
+@dataclass
+class StrategyTransition:
+    """Topology transition metadata for optimizer-state migration.
+
+    Fields represent sequential edits applied in ``apply``:
+    1) duplicate selected parents (append new children)
+    2) split selected parents (remove parents, append 2x children)
+    3) prune low-opacity points
+    """
+
+    duplicate_sel: Optional[torch.Tensor] = None
+    split_keep_parent: Optional[torch.Tensor] = None
+    split_children: int = 0
+    prune_keep: Optional[torch.Tensor] = None
+
+
 class DefaultStrategy:
     """Densification aligned with gsplat ``DefaultStrategy`` / 3DGS.
 
@@ -46,7 +62,7 @@ class DefaultStrategy:
     ``(width/2)*n_cameras`` and ``(height/2)*n_cameras``, norm accumulated.
 
     Refine when ``step > refine_start_iter`` and ``step % refine_every == 0``
-    (strict ``>``, same as gsplat). After apply, call ``reset_grad_accumulator``.
+    (strict ``>``, same as gsplat).
 
     ``absgrad``: use ``v_means2d_abs`` when non-empty; else ``v_means2d``.
     """
@@ -189,13 +205,15 @@ class DefaultStrategy:
         *,
         scale_min: float,
         scale_max: float,
+        bbox: Optional[torch.Tensor] = None,
         step: Optional[int] = None,
-    ) -> bool:
-        """Apply prune/duplicate/split. Returns True if topology changed."""
+    ) -> Tuple[bool, StrategyTransition]:
+        """Apply prune/duplicate/split and return transition metadata."""
         if not self.enabled:
-            return False
+            return False, StrategyTransition()
 
         changed = False
+        transition = StrategyTransition()
         device = gp.means.device
         orig_n = gp.num_gaussians
 
@@ -205,13 +223,14 @@ class DefaultStrategy:
 
         N = gp.num_gaussians
         if N == 0:
-            return False
+            return False, transition
 
         # --- grow: duplicate then split (gsplat order) ---
         dupli_n = int(dupli_mask.sum().item())
         if dupli_mask.any():
             sel = torch.where(dupli_mask[:N])[0]
             if sel.numel() > 0:
+                transition.duplicate_sel = sel.detach().clone()
                 means_new = gp.means[sel]
                 quats_new = gp.quats[sel]
                 scale_ori_new = gp.scale_ori[sel]
@@ -236,6 +255,7 @@ class DefaultStrategy:
         if split_mask.any():
             sel = torch.where(split_mask[:N])[0]
             if sel.numel() > 0:
+                transition.split_children = int(sel.numel() * 2)
                 quats = gp.quats[sel]
                 quats = quats / quats.norm(dim=-1, keepdim=True).clamp_min(1e-12)
                 scales = torch.sigmoid(gp.scale_ori[sel]) * (scale_max - scale_min) + scale_min
@@ -254,6 +274,7 @@ class DefaultStrategy:
 
                 keep_parent = torch.ones(gp.num_gaussians, dtype=torch.bool, device=device)
                 keep_parent[sel] = False
+                transition.split_keep_parent = keep_parent.detach().clone()
                 gp.means = torch.cat([gp.means[keep_parent], means_split], dim=0).contiguous()
                 gp.quats = torch.cat([gp.quats[keep_parent], quats_split], dim=0).contiguous()
                 gp.scale_ori = torch.cat(
@@ -266,6 +287,12 @@ class DefaultStrategy:
         # --- prune last: from current opacities (gsplat _prune_gs), after grow ---
         pruned_n = 0
         prune = gp.opacity.abs() < self.prune_opa_abs
+        if bbox is not None:
+            bbox_dev = bbox.to(device=device, dtype=gp.means.dtype)
+            mins = bbox_dev[0]
+            maxs = bbox_dev[1]
+            prune_bbox = ((gp.means < mins) | (gp.means > maxs)).any(dim=-1)
+            prune = prune | prune_bbox
         if self.min_remaining > 0:
             n = gp.num_gaussians
             if (n - int(prune.sum().item())) < self.min_remaining:
@@ -277,6 +304,7 @@ class DefaultStrategy:
         pruned_n = int(prune.sum().item())
         if prune.any():
             keep = ~prune
+            transition.prune_keep = keep.detach().clone()
             gp.means = gp.means[keep].contiguous()
             gp.quats = gp.quats[keep].contiguous()
             gp.scale_ori = gp.scale_ori[keep].contiguous()
@@ -291,7 +319,7 @@ class DefaultStrategy:
                 f"N: {orig_n} -> {gp.num_gaussians}"
             )
 
-        return changed
+        return changed, transition
 
     def _resize_running_stats(self, keep: torch.Tensor) -> None:
         if self._grad2d is None or self._grad2d.numel() != keep.numel():
@@ -304,15 +332,27 @@ class DefaultStrategy:
     def _cat_running_stats_duplicate(self, sel: torch.Tensor) -> None:
         if self._grad2d is None or self._count is None:
             return
-        self._grad2d = torch.cat([self._grad2d, self._grad2d[sel]], dim=0).contiguous()
-        self._count = torch.cat([self._count, self._count[sel]], dim=0).contiguous()
+        n_new = int(sel.numel())
+        if n_new <= 0:
+            return
+        z_grad = torch.zeros(n_new, device=self._grad2d.device, dtype=self._grad2d.dtype)
+        z_count = torch.zeros(n_new, device=self._count.device, dtype=self._count.dtype)
+        self._grad2d = torch.cat([self._grad2d, z_grad], dim=0).contiguous()
+        self._count = torch.cat([self._count, z_count], dim=0).contiguous()
 
     def _running_stats_split(
         self, keep_parent: torch.Tensor, sel: torch.Tensor
     ) -> None:
         if self._grad2d is None or self._count is None:
             return
-        rep = self._grad2d[sel].repeat(2)
-        rep_c = self._count[sel].repeat(2)
-        self._grad2d = torch.cat([self._grad2d[keep_parent], rep], dim=0).contiguous()
-        self._count = torch.cat([self._count[keep_parent], rep_c], dim=0).contiguous()
+        kept_grad = self._grad2d[keep_parent].contiguous()
+        kept_count = self._count[keep_parent].contiguous()
+        n_children = int(sel.numel()) * 2
+        if n_children <= 0:
+            self._grad2d = kept_grad
+            self._count = kept_count
+            return
+        z_grad = torch.zeros(n_children, device=kept_grad.device, dtype=kept_grad.dtype)
+        z_count = torch.zeros(n_children, device=kept_count.device, dtype=kept_count.dtype)
+        self._grad2d = torch.cat([kept_grad, z_grad], dim=0).contiguous()
+        self._count = torch.cat([kept_count, z_count], dim=0).contiguous()

@@ -17,6 +17,7 @@ beta2: 0.999
 eps: 1.0e-8
 
 # Newton hyper-parameters
+second_order_optimizer: "newton_diag_clamp"
 hess_mode: "DIAGONAL"
 grad_strategy: "EMA"
 hess_strategy: "EMA"
@@ -26,3 +27,13 @@ damping_means: 1.0
 damping_quats: 1.0
 damping_scale_ori: 1.0
 damping_opacity: 1.0
+
+# Per-parameter minimum clamp for diagonal Hessian entries
+clamp_means: 1.0e-5
+clamp_quats: 1.0e-5
+clamp_scale_ori: 1.0e-5
+clamp_opacity: 1.0e-5
+max_update_means: 1.0e9
+max_update_quats: 1.0e9
+max_update_scale_ori: 1.0e9
+max_update_opacity: 1.0e9

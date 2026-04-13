@@ -1,4 +1,4 @@
-# Weights & Biases sweep for `r2gaussian` training (`scripts.train` + `--config-name r2gaussian`).
+# Weights & Biases sweep for `r2gaussian` training (`scripts.train` + `--config-name r2gaussian_train`).
 #
 # Before launching:
 #   1. Replace `entity` and `project` with your W&B team and project.
@@ -6,8 +6,8 @@
 #   3. Optionally adjust `exp.result_dir` or sweep ranges below.
 #   4. `wandb login`
 #   5. Create the sweep and get an ID:
-#        wandb sweep sweep/sweep_r2gaussian.yaml
-#      Copy the printed `entity/project/sweep_id` into `sweep/sweep.sh` as `SWEEP_ID`.
+#        wandb sweep sweep/previous_r2gaussian/sweep_r2gaussian.yaml
+#      Copy the printed `entity/project/sweep_id` into `sweep/previous_r2gaussian/sweep.sh` as `SWEEP_ID`.
 #
 # Sweep metric is `vol/psnr` = `vol_metrics["psnr"]` from 3-D evaluation (requires GT volume in data).
 # If your dataset has no GT volume, eval will not log this metric and the sweep has nothing to optimize.
@@ -26,7 +26,7 @@ project: gsplat2ct
 
 program: scripts/train.py
 method: random
-run_cap: 150
+run_cap: 125
 metric:
   name: vol/psnr
   goal: maximize
@@ -39,25 +39,37 @@ parameters:
     values:
       - "output/r2gaussian_like_sweep_6params"
 
+  # Use precomputed init_<scene>.npy instead of online reconstruction.
+  init.source:
+    values:
+      - file
+
   optim.lr_means:
     distribution: log_uniform_values
-    min: 2.0e-4
+    min: 5.0e-5
     max: 2.0e-3
 
   optim.lr_quats:
     distribution: log_uniform_values
-    min: 2.0e-4
-    max: 2.0e-2
+    min: 3.0e-4
+    max: 3.0e-2
 
   optim.lr_scale_ori:
     distribution: log_uniform_values
-    min: 2.0e-3
-    max: 5.0e-2
+    min: 1.0e-4
+    max: 1.0e-3
 
   optim.lr_opacity:
     distribution: log_uniform_values
-    min: 1.0e-4
+    min: 2.0e-4
     max: 2.0e-3
+
+  # strategy.grow2d / strategy.grow3d (actual config keys below)
+  strategy.grow_grad2d:
+    distribution: uniform
+    min: 1.0e-4
+    max: 5.0e-4
+
 
 command:
   - ${env}
@@ -65,5 +77,5 @@ command:
   - -m
   - scripts.train
   - --config-name
-  - r2gaussian
+  - r2gaussian_train
   - ${args_no_hyphens}

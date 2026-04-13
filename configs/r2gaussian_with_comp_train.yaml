@@ -1,0 +1,20 @@
+# One-stop profile to mimic r2_gaussian settings.
+#
+# Usage:
+#   python -m scripts.train --config-name r2gaussian_train
+# or:
+#   python -m scripts.train --config-name r2gaussian_train exp=25_views
+
+defaults:
+  - base
+  - model: default
+  - trainer: r2gaussian
+  - optim: r2gaussian_adam
+  - schedule: r2gaussian_exp
+  - exp: 25_views
+  - init: r2gaussian
+  - compensate: default
+  - strategy: r2gaussian
+  - vis: r2gaussian
+  - _self_
+

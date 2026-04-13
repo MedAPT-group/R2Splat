@@ -201,6 +201,7 @@ def main(cfg: DictConfig) -> None:
             params,
             scale_min=cfg.scale_min,
             scale_max=cfg.scale_max,
+            eps3d=float(getattr(cfg, "eps3d", 1e-4)),
             ssim_window=cfg.ssim_window,
         )
         vol_metrics, pred_vol = vol_eval.evaluate(

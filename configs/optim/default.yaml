@@ -20,7 +20,11 @@ beta1: 0.9 # pytorch adam default
 beta2: 0.999 # pytorch adam default
 eps: 1.0e-8 # pytorch adam default
 
+# Keep false unless signed opacity (positive + negative kernels) is needed.
+allow_negative_opacity: false
+
 # Newton hyper-parameters (second-order only)
+second_order_optimizer: "newton_diag_clamp" # options: newton_diag_clamp | newton
 hess_mode: "DIAGONAL"
 grad_strategy: "RAW"
 hess_strategy: "RAW"
@@ -28,3 +32,11 @@ damping_means: 1.0e-3
 damping_quats: 1.0e-3
 damping_scale_ori: 1.0e-3
 damping_opacity: 1.0e-3
+clamp_means: 1.0e-5
+clamp_quats: 1.0e-5
+clamp_scale_ori: 1.0e-5
+clamp_opacity: 1.0e-5
+max_update_means: 1.0e9
+max_update_quats: 1.0e9
+max_update_scale_ori: 1.0e9
+max_update_opacity: 1.0e9

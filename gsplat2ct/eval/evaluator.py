@@ -108,7 +108,8 @@ class ProjectionEvaluator:
             )
 
             fwd = self._op.forward_only(rast_params, data_obj, cfg)
-            pred = fwd.outputs["render_output"]
+            # Signed kernels can produce values outside [0, 1]; clamp for evaluation.
+            pred = fwd.outputs["render_output"].clamp(0.0, 1.0)
 
             gt_squeezed = gt.squeeze(-1)
             m = metric_proj(
@@ -139,6 +140,7 @@ class VolumeEvaluator:
         params: Current Gaussian parameters (``Params`` container).
         scale_min: ParameterTransform lower bound.
         scale_max: ParameterTransform upper bound.
+        eps3d: World-to-volume mapping epsilon.
         ssim_window: SSIM kernel size for 3-D SSIM.
     """
 
@@ -148,11 +150,13 @@ class VolumeEvaluator:
         *,
         scale_min: float = 0.001,
         scale_max: float = 1.0,
+        eps3d: float = 1e-4,
         ssim_window: int = 11,
     ):
         self.params = params
         self.scale_min = scale_min
         self.scale_max = scale_max
+        self.eps3d = eps3d
         self.ssim_window = ssim_window
         self._op = GS3DCTVoxelizeCUDA()
         self._op.initialize(params)
@@ -186,7 +190,7 @@ class VolumeEvaluator:
             vol_dim1=D,
             vol_dim0=H,
             vol_tile_size=4,
-            eps3d=1e-4,
+            eps3d=self.eps3d,
             radius_clip=3.0,
             scale_min=self.scale_min,
             scale_max=self.scale_max,
@@ -211,6 +215,9 @@ class VolumeEvaluator:
             )
             pred_vol = pred_vol[slices]
             gt = gt[slices]
+
+        # Signed kernels can produce values outside [0, 1]; clamp for evaluation.
+        pred_vol = pred_vol.clamp(0.0, 1.0)
 
         m = metric_vol(
             pred_vol, gt, window_size=self.ssim_window

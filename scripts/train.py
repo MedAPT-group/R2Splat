@@ -31,9 +31,14 @@ from gsplat2ct.eval.evaluator import ProjectionEvaluator, VolumeEvaluator
 from gsplat2ct.vis.plotting import (
     save_projection_comparison,
     save_volume_comparison,
+    save_init_coarse_volume_debug,
     save_loss_curve,
+    save_projection_triplet,
+    save_residual_slices_with_points,
 )
 from gsplat2ct.vis.video import ProjectionVideoRecorder, VideoVisConfig
+from gsplat2ct.ops.gs3d_ct_rasterize import GS3DCTRasterizeCUDA
+from gsplat2ct.ops.gs3d_ct_voxelize import GS3DCTVoxelizeCUDA
 
 
 def _env_truthy(name: str, default: str = "") -> bool:
@@ -322,7 +327,10 @@ def build_optimizer(cfg: DictConfig, params: Params):
     from gsplat2ct.optim.gs3d_ct import (
         GS3DCTAdamOptimizer,
         GS3DCTNewtonOptimizer,
-        PARAM_NAMES,
+    )
+    from gsplat2ct.optim.gs3d_ct_diag_clamp import (
+        DiagonalClampSecondOrderConfig,
+        GS3DCTNewtonDiagClampOptimizer,
     )
 
     lr_map = {
@@ -339,14 +347,51 @@ def build_optimizer(cfg: DictConfig, params: Params):
             "scale_ori": cfg.optim.damping_scale_ori,
             "opacity": cfg.optim.damping_opacity,
         }
-        config = SecondOrderConfig(
-            lr_map=lr_map,
-            damping_map=damping_map,
-            hess_mode=HessianMode[cfg.optim.hess_mode],
-            grad_strategy=SignalStrategy[cfg.optim.grad_strategy],
-            hess_strategy=SignalStrategy[cfg.optim.hess_strategy],
+
+        second_order_optimizer = str(
+            getattr(cfg.optim, "second_order_optimizer", "newton_diag_clamp")
+        ).lower()
+
+        if second_order_optimizer in {"newton_diag_clamp", "diag_clamp", "clamped_diag"}:
+            clamp_map = {
+                "means": float(getattr(cfg.optim, "clamp_means", 1e-5)),
+                "quats": float(getattr(cfg.optim, "clamp_quats", 1e-5)),
+                "scale_ori": float(getattr(cfg.optim, "clamp_scale_ori", 1e-5)),
+                "opacity": float(getattr(cfg.optim, "clamp_opacity", 1e-5)),
+            }
+            max_update_map = {
+                "means": float(getattr(cfg.optim, "max_update_means", float("inf"))),
+                "quats": float(getattr(cfg.optim, "max_update_quats", float("inf"))),
+                "scale_ori": float(getattr(cfg.optim, "max_update_scale_ori", float("inf"))),
+                "opacity": float(getattr(cfg.optim, "max_update_opacity", float("inf"))),
+            }
+            config = DiagonalClampSecondOrderConfig(
+                lr_map=lr_map,
+                damping_map=damping_map,
+                clamp_map=clamp_map,
+                max_update_map=max_update_map,
+                hess_mode=HessianMode.DIAGONAL,
+                grad_strategy=SignalStrategy[cfg.optim.grad_strategy],
+                hess_strategy=SignalStrategy[cfg.optim.hess_strategy],
+            )
+            config.allow_negative_opacity = bool(getattr(cfg.optim, "allow_negative_opacity", False))
+            return GS3DCTNewtonDiagClampOptimizer(params, config)
+
+        if second_order_optimizer in {"newton", "legacy_newton"}:
+            config = SecondOrderConfig(
+                lr_map=lr_map,
+                damping_map=damping_map,
+                hess_mode=HessianMode[cfg.optim.hess_mode],
+                grad_strategy=SignalStrategy[cfg.optim.grad_strategy],
+                hess_strategy=SignalStrategy[cfg.optim.hess_strategy],
+            )
+            config.allow_negative_opacity = bool(getattr(cfg.optim, "allow_negative_opacity", False))
+            return GS3DCTNewtonOptimizer(params, config)
+
+        raise ValueError(
+            f"Unknown optim.second_order_optimizer={second_order_optimizer}. "
+            "Use one of: newton_diag_clamp, newton."
         )
-        return GS3DCTNewtonOptimizer(params, config)
 
     config = FirstOrderConfig(
         lr_map=lr_map,
@@ -354,6 +399,7 @@ def build_optimizer(cfg: DictConfig, params: Params):
         beta2=cfg.optim.beta2,
         eps=cfg.optim.eps,
     )
+    config.allow_negative_opacity = bool(getattr(cfg.optim, "allow_negative_opacity", False))
     return GS3DCTAdamOptimizer(params, config)
 
 
@@ -423,6 +469,7 @@ def train(cfg: DictConfig) -> None:
     if init_source not in {"online", "file"}:
         raise ValueError("init.source must be one of [online, file]")
 
+    coarse_volume_wdh: Optional[torch.Tensor] = None
     if init_source == "online":
         init_result = initialize_from_metadata(
             data_dir=cfg.exp.data_dir,
@@ -433,8 +480,11 @@ def train(cfg: DictConfig) -> None:
             density_thresh=float(cfg.init.density_thresh),
             density_rescale=float(cfg.init.density_rescale),
             random_density_max=float(cfg.init.random_density_max),
-            sart_n_iter=int(cfg.init.sart_n_iter),
+            # Keep compatibility with init profiles that omit sart_n_iter.
+            sart_n_iter=int(getattr(cfg.init, "sart_n_iter", 20)),
         )
+        if init_result.coarse_volume_wdh is not None:
+            coarse_volume_wdh = torch.from_numpy(init_result.coarse_volume_wdh).float().to(device)
         gp = GaussianParams.from_points(
             init_result.sampled_points_n4,
             scale_min=cfg.model.scale_min,
@@ -461,6 +511,26 @@ def train(cfg: DictConfig) -> None:
     params = gp.to_params()
     print(f"   {gp.num_gaussians} Gaussians initialized")
 
+    # Debug visualization for initialization coarse volume (disabled).
+    # if coarse_volume_wdh is not None and vol_gt is not None:
+    #     cw = coarse_volume_wdh.detach().cpu()
+    #     vg = vol_gt.detach().cpu()
+    #     w = min(int(cw.shape[0]), int(vg.shape[0]))
+    #     d = min(int(cw.shape[1]), int(vg.shape[1]))
+    #     h = min(int(cw.shape[2]), int(vg.shape[2]))
+    #     cw = cw[:w, :d, :h]
+    #     vg = vg[:w, :d, :h]
+    #     slice_indices = (w // 2, d // 2, h // 2)
+    #     init_debug_dir = os.path.join(vis_dir, "init_debug")
+    #     os.makedirs(init_debug_dir, exist_ok=True)
+    #     save_init_coarse_volume_debug(
+    #         coarse_vol=cw,
+    #         gt_vol=vg,
+    #         path=os.path.join(init_debug_dir, "init_coarse_vs_gt.png"),
+    #         psnr_val=_compute_psnr(cw, vg),
+    #         slice_indices=slice_indices,
+    #     )
+
     # ---- Operator ----
     print("[3/5] Creating operator...")
     operator = GS3DCTLossCUDA()
@@ -478,7 +548,9 @@ def train(cfg: DictConfig) -> None:
 
     # ---- Strategy ----
     from gsplat2ct.strategy import DefaultStrategy
+    from gsplat2ct.strategy import CompensationStrategy
     strategy = DefaultStrategy(getattr(cfg, "strategy", None) or {})
+    compensate_strategy = CompensationStrategy(getattr(cfg, "compensate", None) or {})
 
     # ---- Visualization manager ----
     vis_cfg = getattr(cfg, "vis", None)
@@ -633,22 +705,159 @@ def train(cfg: DictConfig) -> None:
                 scale_max=cfg.model.scale_max,
                 grow_scale3d_abs=grow_scale3d_abs,
             )
-            changed = strategy.apply(
+            changed, transition = strategy.apply(
                 gp,
                 out,
                 scale_min=cfg.model.scale_min,
                 scale_max=cfg.model.scale_max,
+                bbox=bbox,
                 step=step,
             )
-            strategy.reset_grad_accumulator()
             if changed:
+                if not use_second_order and hasattr(optimizer, "apply_topology_transition"):
+                    optimizer.apply_topology_transition(
+                        duplicate_sel=transition.duplicate_sel,
+                        split_keep_parent=transition.split_keep_parent,
+                        split_children=transition.split_children,
+                        prune_keep=transition.prune_keep,
+                    )
                 params = gp.to_params()
                 operator.initialize(params)
                 optimizer.params = params
-                optimizer.reset_moments()
+                if use_second_order:
+                    optimizer.reset_moments()
                 video_recorder.set_params(params)
                 optimizer.zero_grad()
                 topology_changed = True
+
+        if (
+            compensate_strategy.should_resample(step)
+            and coarse_volume_wdh is not None
+            and bbox is not None
+            and volume_shape_wdh is not None
+        ):
+            # Debug visualization before compensation (disabled).
+            # before_pred_proj, before_gt_proj = _render_eval_projection_single(
+            #     params=params,
+            #     dataset=evalset,
+            #     device=device,
+            #     scale_min=cfg.model.scale_min,
+            #     scale_max=cfg.model.scale_max,
+            #     eps_blur=cfg.trainer.eps_blur,
+            #     view_index=0,
+            # )
+            # before_pred_vol = _render_eval_volume(
+            #     params=params,
+            #     bbox=bbox,
+            #     volume_shape_wdh=volume_shape_wdh,
+            #     device=device,
+            #     scale_min=cfg.model.scale_min,
+            #     scale_max=cfg.model.scale_max,
+            #     eps3d=cfg.trainer.eps3d,
+            # )
+
+            n_before_comp = gp.num_gaussians
+            changed_comp, comp_stats = compensate_strategy.apply(
+                gp,
+                coarse_volume_wdh=coarse_volume_wdh,
+                bbox=bbox,
+                volume_shape_wdh=volume_shape_wdh,
+                scale_min=cfg.model.scale_min,
+                scale_max=cfg.model.scale_max,
+                step=step,
+            )
+            if changed_comp:
+                strategy.reset_grad_accumulator()
+                if not use_second_order and hasattr(optimizer, "apply_topology_transition"):
+                    n_added = max(int(gp.num_gaussians) - int(n_before_comp), 0)
+                    optimizer.apply_topology_transition(append_new=n_added)
+                params = gp.to_params()
+                operator.initialize(params)
+                optimizer.params = params
+                if use_second_order:
+                    optimizer.reset_moments()
+                video_recorder.set_params(params)
+                optimizer.zero_grad()
+                topology_changed = True
+
+                # Debug visualization after compensation (disabled).
+                # after_pred_proj, after_gt_proj = _render_eval_projection_single(
+                #     params=params,
+                #     dataset=evalset,
+                #     device=device,
+                #     scale_min=cfg.model.scale_min,
+                #     scale_max=cfg.model.scale_max,
+                #     eps_blur=cfg.trainer.eps_blur,
+                #     view_index=0,
+                # )
+                # after_pred_vol = _render_eval_volume(
+                #     params=params,
+                #     bbox=bbox,
+                #     volume_shape_wdh=volume_shape_wdh,
+                #     device=device,
+                #     scale_min=cfg.model.scale_min,
+                #     scale_max=cfg.model.scale_max,
+                #     eps3d=cfg.trainer.eps3d,
+                # )
+                #
+                # comp_vis_dir = os.path.join(vis_dir, "compensate_debug")
+                # os.makedirs(comp_vis_dir, exist_ok=True)
+                #
+                # save_projection_triplet(
+                #     pred=before_pred_proj,
+                #     gt=before_gt_proj,
+                #     path=os.path.join(comp_vis_dir, f"step_{step:06d}_proj_before.png"),
+                #     title=(
+                #         f"Compensation BEFORE (step {step}) "
+                #         f"PSNR={_compute_psnr(before_pred_proj, before_gt_proj):.2f} dB"
+                #     ),
+                # )
+                # save_projection_triplet(
+                #     pred=after_pred_proj,
+                #     gt=after_gt_proj,
+                #     path=os.path.join(comp_vis_dir, f"step_{step:06d}_proj_after.png"),
+                #     title=(
+                #         f"Compensation AFTER (step {step}) "
+                #         f"PSNR={_compute_psnr(after_pred_proj, after_gt_proj):.2f} dB"
+                #     ),
+                # )
+                #
+                # if vol_gt is not None:
+                #     slice_indices = (
+                #         int(before_pred_vol.shape[0] // 2),
+                #         int(before_pred_vol.shape[1] // 2),
+                #         int(before_pred_vol.shape[2] // 2),
+                #     )
+                #     save_volume_comparison(
+                #         before_pred_vol,
+                #         vol_gt,
+                #         os.path.join(comp_vis_dir, f"step_{step:06d}_vol_before.png"),
+                #         psnr_val=_compute_psnr(before_pred_vol, vol_gt.detach().cpu()),
+                #         slice_indices=slice_indices,
+                #     )
+                #     save_volume_comparison(
+                #         after_pred_vol,
+                #         vol_gt,
+                #         os.path.join(comp_vis_dir, f"step_{step:06d}_vol_after.png"),
+                #         psnr_val=_compute_psnr(after_pred_vol, vol_gt.detach().cpu()),
+                #         slice_indices=slice_indices,
+                #     )
+                # else:
+                #     slice_indices = (
+                #         int(before_pred_vol.shape[0] // 2),
+                #         int(before_pred_vol.shape[1] // 2),
+                #         int(before_pred_vol.shape[2] // 2),
+                #     )
+                #
+                # if comp_stats.residual_volume_wdh is not None and comp_stats.sampled_means_world is not None:
+                #     save_residual_slices_with_points(
+                #         residual_vol=comp_stats.residual_volume_wdh,
+                #         sampled_points_world=comp_stats.sampled_means_world,
+                #         sampled_values=comp_stats.sampled_opacity,
+                #         bbox=bbox,
+                #         path=os.path.join(comp_vis_dir, f"step_{step:06d}_residual_slices_with_points.png"),
+                #         slice_indices=slice_indices,
+                #     )
 
         if not topology_changed:
             optimizer.step()
@@ -756,6 +965,7 @@ def _run_eval(
             params,
             scale_min=cfg.model.scale_min,
             scale_max=cfg.model.scale_max,
+            eps3d=cfg.trainer.eps3d,
             ssim_window=cfg.trainer.window_size,
         )
         vol_metrics, pred_vol = vol_eval.evaluate(
@@ -789,6 +999,121 @@ def _run_eval(
             wandb.log(log_dict, step=step)
     except ImportError:
         pass
+
+
+@torch.no_grad()
+def _render_eval_projection_single(
+    *,
+    params: Params,
+    dataset: CTImageDataset,
+    device: torch.device,
+    scale_min: float,
+    scale_max: float,
+    eps_blur: float,
+    view_index: int = 0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Render a single evaluation projection (pred, gt), both clamped to [0,1]."""
+    class _ParamWrapper:
+        def __init__(self, data: torch.Tensor):
+            self.data = data
+
+    idx = int(max(0, min(view_index, len(dataset) - 1)))
+    dataset.preload_to(device)
+    batch = dataset.get_batch(idx)
+
+    c2w = batch["camtoworld"].contiguous()
+    K = batch["K"].contiguous()
+    gt = batch["image"].contiguous().squeeze(-1)
+    if gt.ndim == 2:
+        gt = gt.unsqueeze(0)
+    # gt = gt.clamp(0.0, 1.0)
+
+    viewmats = torch.linalg.inv(c2w).contiguous()
+    C = viewmats.shape[0]
+    opacity_raw = params.get("opacity").data
+    opacity_2d = opacity_raw.unsqueeze(0).expand(C, -1).contiguous()
+
+    rast_params = Params()
+    rast_params.add_param("means", params.get("means"))
+    rast_params.add_param("quats", params.get("quats"))
+    rast_params.add_param("scale_ori", params.get("scale_ori"))
+    rast_params.add_param("opacity", _ParamWrapper(opacity_2d))
+
+    data_obj = Data()
+    data_obj.set(viewmats=viewmats, Ks=K)
+
+    img_h, img_w = int(gt.shape[1]), int(gt.shape[2])
+    op_cfg = Config()
+    op_cfg.set(
+        img_dim1=img_w,
+        img_dim0=img_h,
+        tile_size=16,
+        eps_blur=eps_blur,
+        scale_min=scale_min,
+        scale_max=scale_max,
+    )
+
+    op = GS3DCTRasterizeCUDA()
+    op.initialize(rast_params)
+    pred = op.forward_only(rast_params, data_obj, op_cfg).outputs["render_output"]
+    pred = pred.clamp(0.0, 1.0)
+    return pred[0].detach().cpu(), gt[0].detach().cpu()
+
+
+@torch.no_grad()
+def _render_eval_volume(
+    *,
+    params: Params,
+    bbox: torch.Tensor,
+    volume_shape_wdh: Tuple[int, int, int],
+    device: torch.device,
+    scale_min: float,
+    scale_max: float,
+    eps3d: float,
+) -> torch.Tensor:
+    """Render current full volume for debug visualization in (W,D,H), clamped to [0,1]."""
+    bbox_dev = bbox.to(device)
+    ranges = bbox_dev[1] - bbox_dev[0]
+    centers = (bbox_dev[0] + bbox_dev[1]) / 2.0
+    W, D, H = volume_shape_wdh
+
+    data_obj = Data()
+    data_obj.set(ranges=ranges, centers=centers)
+
+    cfg = Config()
+    cfg.set(
+        vol_dim2=W,
+        vol_dim1=D,
+        vol_dim0=H,
+        vol_tile_size=8,
+        eps3d=eps3d,
+        radius_clip=3.0,
+        scale_min=scale_min,
+        scale_max=scale_max,
+    )
+
+    op = GS3DCTVoxelizeCUDA()
+    op.initialize(params)
+    pred_vol = op.forward_only(params, data_obj, cfg).outputs["render_output"]
+    if pred_vol.ndim >= 3:
+        pred_vol = pred_vol.squeeze()
+    if pred_vol.ndim == 3:
+        pred_vol = pred_vol.permute(2, 1, 0).contiguous()
+    pred_vol = pred_vol.clamp(0.0, 1.0)
+    return pred_vol.detach().cpu()
+
+
+def _compute_psnr(pred: torch.Tensor, gt: torch.Tensor, eps: float = 1e-12) -> float:
+    """Compute PSNR for tensors expected to be in [0, 1]."""
+    p = pred.detach().float()
+    g = gt.detach().float()
+    if p.shape != g.shape:
+        slices = tuple(slice(0, min(a, b)) for a, b in zip(p.shape, g.shape))
+        p = p[slices]
+        g = g[slices]
+    mse = torch.mean((p - g) ** 2).item()
+    mse = max(float(mse), eps)
+    return float(-10.0 * np.log10(mse))
 
 
 # =====================================================================

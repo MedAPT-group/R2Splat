@@ -1,0 +1,89 @@
+# One-stop profile for r2gaussian-style training with diagonal-clamped Newton.
+#
+# Usage:
+#   python -m scripts.train --config-name r2gaussian_newton_train
+# or:
+#   python -m scripts.train --config-name r2gaussian_newton_train exp=25_views
+
+defaults:
+  - base
+  - model: default
+  - trainer: r2gaussian
+  - optim: default
+  - schedule: r2gaussian_exp
+  - exp: 25_views
+  - init: r2gaussian
+  - compensate: none
+  - strategy: r2gaussian
+  - vis: r2gaussian
+  - _self_
+
+trainer:
+  # Keep parity with r2gaussian_train profile.
+  save_steps: []
+  max_steps: 10000
+  batch_size: 3
+  angle_sampling_strategy: "evenly_spaced"
+  eval_interval: 500
+
+strategy:
+  refine_stop_iter: 5000
+
+optim:
+  use_second_order: true
+  second_order_optimizer: "newton_diag_clamp"
+
+  # Use Adam-style normalization for both gradient and Hessian signals.
+  grad_strategy: "ADAM_NORM"
+  hess_strategy: "ADAM_NORM"
+  hess_mode: "DIAGONAL"
+
+  # Start from r2gaussian first-order LRs and scale by 1e-5 to offset
+  # the 1/(damping + clamp) amplification when Hessian is clamped.
+  lr_means: 2.0e-9
+  lr_quats: 1.0e-8
+  lr_scale_ori: 5.0e-8
+  lr_opacity: 5.0e-9
+
+  # Per-parameter damping: 1e-5 -> 1e-6 via schedule.damping.min_factor=0.1.
+  damping_means: 1.0e-6
+  damping_quats: 1.0e-6
+  damping_scale_ori: 1.0e-6
+  damping_opacity: 1.0e-6
+
+  # Clamp all Hessian diagonal entries to at least 1e-6.
+  clamp_means: 1.0e-7
+  clamp_quats: 1.0e-7
+  clamp_scale_ori: 1.0e-7
+  clamp_opacity: 1.0e-7
+
+  # Element-wise update clip for safety during early Newton iterations.
+  max_update_means: 0.01
+  max_update_quats: 0.01
+  max_update_scale_ori: 0.01
+  max_update_opacity: 0.01
+
+  allow_negative_opacity: false
+
+schedule:
+  enabled: true
+
+  # Keep r2gaussian-style exponential LR decay.
+  lr:
+    type: "exp"
+    warmup_steps: 0
+    min_factor: 0.1
+
+  # Exponential damping decay: 1e-5 -> 1e-6.
+  damping:
+    type: "exp"
+    warmup_steps: 0
+    min_factor: 0.1
+
+vis:
+  save_projection_comparison: true
+  save_volume_comparison: true
+  save_loss_curve: true
+  video:
+    enabled: true
+    interval: 10

@@ -150,7 +150,7 @@ def metric_vol(
     pred: torch.Tensor,
     target: torch.Tensor,
     window_size: int = 11,
-    data_range: Optional[float] = None,
+    data_range: Optional[float] = 1.0,
 ) -> Dict[str, torch.Tensor]:
     """Volume reconstruction quality metrics.
 

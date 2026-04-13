@@ -4,6 +4,7 @@ defaults:
   - base
   - model: default
   - init: default
+  - compensate: none
   - trainer: default
   - optim: default
   - schedule: none

@@ -29,9 +29,9 @@ fi
 cd /home/chengzyi/myterminus/code/gsplat-3dgs2ct
 mkdir -p logs
 
-SWEEP_ID="${SWEEP_ID:-810364379denveryi-eth-zurich/gsplat2ct/fl3pcltt}"
+SWEEP_ID="${SWEEP_ID:-810364379denveryi-eth-zurich/gsplat2ct/l4jci68n}"
 if [[ "${SWEEP_ID}" == *"YOUR_"* ]] || [[ -z "${SWEEP_ID}" ]]; then
-  echo "ERROR: Set SWEEP_ID to the value from: wandb sweep sweep/sweep_r2gaussian.yaml" >&2
+  echo "ERROR: Set SWEEP_ID to the value from: wandb sweep sweep/previous_r2gaussian/sweep_r2gaussian.yaml" >&2
   exit 1
 fi
 

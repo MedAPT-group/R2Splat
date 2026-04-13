@@ -1,7 +1,7 @@
 # R2Gaussian-like training loop settings.
 device: "cuda:0"
 
-max_steps: 30000
+max_steps: 30001
 batch_size: 1
 
 # View sampling strategy for projection batches.
@@ -11,7 +11,7 @@ angle_sampling_strategy: "random"
 # Unit of meta_data angle values.
 angle_unit: "auto"
 
-save_steps: [999, 5999, 9999, 19999, 29999]
+save_steps: []
 
 # Image loss settings
 # image_loss_type: r2gaussian-like l1
@@ -30,7 +30,7 @@ img_tile_size: 16
 vol_tile_size: 8
 eps3d: 1.0e-8
 radius_clip: 3.0
-vol_loss_eps: 1.0e-4
+vol_loss_eps: 1.0e-8
 
 # Evaluation
 eval_interval: 1000

@@ -133,7 +133,8 @@ class GS3DCTAdamOptimizer(FirstOrderOptimizerBase):
     def _apply_constraints(self) -> None:
         _renormalize_quats(self.params)
         p = self.params.get("opacity")
-        if p is not None:
+        allow_negative_opacity = bool(getattr(self.config, "allow_negative_opacity", False))
+        if p is not None and not allow_negative_opacity:
             p.data.clamp_(min=0.0)
 
 
@@ -245,7 +246,8 @@ class GS3DCTNewtonOptimizer(NewtonOptimizerBase):
     def _apply_constraints(self) -> None:
         _renormalize_quats(self.params)
         p = self.params.get("opacity")
-        if p is not None:
+        allow_negative_opacity = bool(getattr(self.config, "allow_negative_opacity", False))
+        if p is not None and not allow_negative_opacity:
             p.data.clamp_(min=0.0)
 
 

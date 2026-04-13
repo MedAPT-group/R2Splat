@@ -191,6 +191,72 @@ class FirstOrderOptimizerBase(OptimizerBase):
         self._m2.clear()
         self._step_count = 0
 
+    @staticmethod
+    def _append_zero_rows(state: torch.Tensor, n_new: int) -> torch.Tensor:
+        if n_new <= 0:
+            return state
+        pad_shape = (int(n_new),) + tuple(state.shape[1:])
+        pad = torch.zeros(pad_shape, device=state.device, dtype=state.dtype)
+        return torch.cat([state, pad], dim=0).contiguous()
+
+    @torch.no_grad()
+    def apply_topology_transition(
+        self,
+        *,
+        duplicate_sel: Optional[torch.Tensor] = None,
+        split_keep_parent: Optional[torch.Tensor] = None,
+        split_children: int = 0,
+        prune_keep: Optional[torch.Tensor] = None,
+        append_new: int = 0,
+    ) -> None:
+        """Migrate Adam moments across topology edits.
+
+        This mirrors the 3DGS/r2-style behavior:
+        - existing points keep their moments,
+        - newly created points get zero-initialized moments,
+        - removed points drop their moments.
+        """
+        if not self._m1 or not self._m2:
+            return
+
+        for name in self.param_names:
+            m1 = self._m1.get(name)
+            m2 = self._m2.get(name)
+            if m1 is None or m2 is None:
+                continue
+
+            if duplicate_sel is not None and duplicate_sel.numel() > 0:
+                m1 = self._append_zero_rows(m1, int(duplicate_sel.numel()))
+                m2 = self._append_zero_rows(m2, int(duplicate_sel.numel()))
+
+            if split_keep_parent is not None:
+                keep_parent = split_keep_parent.to(device=m1.device, dtype=torch.bool)
+                if keep_parent.numel() != m1.shape[0]:
+                    self._m1.pop(name, None)
+                    self._m2.pop(name, None)
+                    continue
+                m1 = m1[keep_parent].contiguous()
+                m2 = m2[keep_parent].contiguous()
+                if split_children > 0:
+                    m1 = self._append_zero_rows(m1, int(split_children))
+                    m2 = self._append_zero_rows(m2, int(split_children))
+
+            if prune_keep is not None:
+                keep = prune_keep.to(device=m1.device, dtype=torch.bool)
+                if keep.numel() != m1.shape[0]:
+                    self._m1.pop(name, None)
+                    self._m2.pop(name, None)
+                    continue
+                m1 = m1[keep].contiguous()
+                m2 = m2[keep].contiguous()
+
+            if append_new > 0:
+                m1 = self._append_zero_rows(m1, int(append_new))
+                m2 = self._append_zero_rows(m2, int(append_new))
+
+            self._m1[name] = m1
+            self._m2[name] = m2
+
     # ---- optimisation step -------------------------------------------------
 
     def step(self) -> None:
@@ -204,6 +270,9 @@ class FirstOrderOptimizerBase(OptimizerBase):
             lr = self.config.get_lr(name)
 
             if name not in self._m1:
+                self._m1[name] = torch.zeros_like(g)
+                self._m2[name] = torch.zeros_like(g)
+            elif self._m1[name].shape != g.shape or self._m2[name].shape != g.shape:
                 self._m1[name] = torch.zeros_like(g)
                 self._m2[name] = torch.zeros_like(g)
 

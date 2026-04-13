@@ -33,6 +33,11 @@ from .gs3d_ct import (
     create_gs3d_ct_adam,
     create_gs3d_ct_newton,
 )
+from .gs3d_ct_diag_clamp import (
+    DiagonalClampSecondOrderConfig,
+    GS3DCTNewtonDiagClampOptimizer,
+    create_gs3d_ct_newton_diag_clamp,
+)
 
 # --- Legacy optimizers ---
 from .mlp import MLPOptimizerConfig, MLPSecondOrderOptimizer
@@ -54,6 +59,7 @@ __all__ = [
     "OptimizerConfig",
     "FirstOrderConfig",
     "SecondOrderConfig",
+    "DiagonalClampSecondOrderConfig",
 
     # New base classes
     "OptimizerBase",
@@ -63,8 +69,10 @@ __all__ = [
     # GS3DCT optimizers
     "GS3DCTAdamOptimizer",
     "GS3DCTNewtonOptimizer",
+    "GS3DCTNewtonDiagClampOptimizer",
     "create_gs3d_ct_adam",
     "create_gs3d_ct_newton",
+    "create_gs3d_ct_newton_diag_clamp",
 
     # Legacy
     "SecondOrderOptimizerBase",

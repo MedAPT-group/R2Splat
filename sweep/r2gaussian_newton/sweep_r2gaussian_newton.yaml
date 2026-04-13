@@ -1,0 +1,111 @@
+# Weights & Biases sweep for diagonal-clamped Newton training
+# (`scripts.train` + `--config-name r2gaussian_newton_train`).
+#
+# Before launching:
+#   1. Edit `entity`, `project`, `exp.data_dir`, and optional `exp.result_dir`.
+#   2. Login: `wandb login`
+#   3. Create sweep:
+#        wandb sweep sweep/r2gaussian_newton/sweep_r2gaussian_newton.yaml
+#   4. Submit agents with the returned SWEEP_ID using:
+#        sbatch sweep/r2gaussian_newton/sweep.sh
+
+entity: 810364379denveryi-eth-zurich
+project: gsplat2ct
+
+program: scripts/train.py
+method: random
+run_cap: 150
+metric:
+  name: vol/psnr
+  goal: maximize
+
+parameters:
+  exp.data_dir:
+    values:
+      - "/home/chengzyi/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone"
+
+  exp.result_dir:
+    values:
+      - "output/r2gaussian_newton_sweep"
+
+  # Keep init behavior consistent and fast for sweeps.
+  init.source:
+    values:
+      - file
+
+  # Disable all visualization for sweep efficiency.
+  vis.save_projection_comparison:
+    values:
+      - false
+  vis.save_volume_comparison:
+    values:
+      - false
+  vis.save_loss_curve:
+    values:
+      - false
+  vis.video.enabled:
+    values:
+      - false
+
+  # Per-parameter-group LR sweep.
+  optim.lr_means:
+    distribution: log_uniform_values
+    min: 5.0e-10
+    max: 5.0e-6
+  optim.lr_quats:
+    distribution: log_uniform_values
+    min: 2.0e-9
+    max: 2.0e-5
+  optim.lr_scale_ori:
+    distribution: log_uniform_values
+    min: 1.0e-9
+    max: 1.0e-5
+  optim.lr_opacity:
+    distribution: log_uniform_values
+    min: 1.0e-10
+    max: 1.0e-6
+
+  # Per-parameter-group damping sweep (base value before schedule decay).
+  optim.damping_means:
+    distribution: log_uniform_values
+    min: 5.0e-8
+    max: 5.0e-4
+  optim.damping_quats:
+    distribution: log_uniform_values
+    min: 5.0e-8
+    max: 5.0e-4
+  optim.damping_scale_ori:
+    distribution: log_uniform_values
+    min: 5.0e-8
+    max: 5.0e-4
+  optim.damping_opacity:
+    distribution: log_uniform_values
+    min: 5.0e-8
+    max: 5.0e-4
+
+  # Per-parameter-group max update clipping sweep.
+  optim.max_update_means:
+    distribution: log_uniform_values
+    min: 1.0e-3
+    max: 2.0e-2
+  optim.max_update_quats:
+    distribution: log_uniform_values
+    min: 1.0e-3
+    max: 2.0e-2
+  optim.max_update_scale_ori:
+    distribution: log_uniform_values
+    min: 1.0e-3
+    max: 2.0e-2
+  optim.max_update_opacity:
+    distribution: log_uniform_values
+    min: 1.0e-3
+    max: 2.0e-2
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - scripts.train
+  - --config-name
+  - r2gaussian_newton_train
+  - ${args_no_hyphens}
