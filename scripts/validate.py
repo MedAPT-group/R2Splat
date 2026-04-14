@@ -52,6 +52,7 @@ def _evaluate_projections(
     psnr_list, ssim_list = [], []
     pred_proj_all: List[np.ndarray] = []
     gt_proj_all: List[np.ndarray] = []
+    eps_blur = float(getattr(cfg, "eps_blur", 1e-8))
 
     for idx in tqdm(range(len(dataset)), desc=f"Evaluating {split_name}"):
         batch = dataset.get_batch(idx)
@@ -78,7 +79,7 @@ def _evaluate_projections(
         op_cfg = Config()
         op_cfg.set(
             img_dim1=img_w, img_dim0=img_h, tile_size=16,
-            eps_blur=0.3,
+            eps_blur=eps_blur,
             scale_min=cfg.scale_min, scale_max=cfg.scale_max,
         )
 

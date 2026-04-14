@@ -21,4 +21,5 @@ save_volume_npy: true
 # Must match training model config when loading a checkpoint.
 scale_min: 0.001
 scale_max: 1.0
+eps_blur: 1.0e-8
 eps3d: 1.0e-8
