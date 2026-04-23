@@ -1,0 +1,120 @@
+# Weights & Biases sweep for damping stabilization on Newton CT reconstruction.
+#
+# Base profile: configs/playground_newton_train_ema_grad_hess.yaml (second-order
+# Newton + EMA + topology beta reanneal + topology damping reanneal + exp damping
+# decay). Everything except the swept knobs is inherited from that profile.
+#
+# Swept knobs:
+#   1. Per-parameter-group base damping (means / quats / scale_ori / opacity).
+#   2. Topology damping reanneal peak factor.
+#   3. End-to-start damping decay factor (schedule.damping.min_factor).
+#
+# Before launching:
+#   1. Edit `entity`, `project`, and `exp.data_dir` below.
+#   2. Login: `wandb login`
+#   3. Create the sweep and capture the printed sweep id:
+#        wandb sweep sweep/sweep_damping/sweep_damping.yaml
+#   4. Submit agents with the returned SWEEP_ID:
+#        SWEEP_ID=<entity/project/sweep_id> sbatch sweep/sweep_damping/sweep.sh
+
+entity: 810364379denveryi-eth-zurich
+project: gsplat2ct
+
+program: scripts/train.py
+method: random
+run_cap: 100
+metric:
+  name: vol/psnr
+  goal: maximize
+
+parameters:
+  # ---- Dataset / output (fixed for this sweep) ----
+  exp.data_dir:
+    values:
+      - "/home/chengzyi/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_75_angle_360/0_chest_cone"
+
+  exp.result_dir:
+    values:
+      - "output/sweep_damping"
+
+  # Validate every 100 steps during sweep runs.
+  trainer.eval_interval:
+    values:
+      - 100
+
+  # Disable per-step visualization overhead in sweeps; only keep the metric.
+  optim.verbose:
+    values:
+      - false
+  optim.warmup_beta_verbose:
+    values:
+      - false
+  optim.topology_damping_reanneal_verbose:
+    values:
+      - false
+  strategy.verbose:
+    values:
+      - false
+  vis.save_projection_comparison:
+    values:
+      - false
+  vis.save_volume_comparison:
+    values:
+      - false
+  vis.save_loss_curve:
+    values:
+      - false
+  vis.video.enabled:
+    values:
+      - false
+
+  # ---- Per-parameter-group base damping (peak damping before schedule decay) ----
+  # Sweep around the recommended orders of magnitude:
+  #   means     ~ 1e-2, quats ~ 1e-3, scale_ori ~ 1e-4, opacity ~ 2e-3.
+  # Each spans ~2 orders of magnitude around its center.
+  optim.damping_means:
+    distribution: log_uniform_values
+    min: 1.0e-3
+    max: 1.0e-1
+
+  optim.damping_quats:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 1.0e-2
+
+  optim.damping_scale_ori:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-3
+
+  optim.damping_opacity:
+    distribution: log_uniform_values
+    min: 2.0e-4
+    max: 2.0e-2
+
+  # ---- Topology damping reanneal peak factor ----
+  # 1 disables the transient boost; 1000 boosts damping 1000x right after
+  # split/duplicate/prune. Default in the base config is 100.
+  optim.topology_damping_reanneal_factor:
+    distribution: log_uniform_values
+    min: 1.0
+    max: 1.0e3
+
+  # ---- End-to-start damping decay factor (schedule.damping.min_factor) ----
+  # min_factor < 1 means damping decays multiplicatively over max_steps:
+  #   effective_base(t) = base * min_factor^(t / max_steps).
+  # 1.0e-3 means "damping at end of training = base / 1000".
+  # 1.0 means "no decay, keep base constant".
+  schedule.damping.min_factor:
+    distribution: log_uniform_values
+    min: 1.0e-3
+    max: 1.0
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - scripts.train
+  - --config-name
+  - playground_newton_train_ema_grad_hess
+  - ${args_no_hyphens}

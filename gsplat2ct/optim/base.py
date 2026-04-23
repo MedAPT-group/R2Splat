@@ -16,7 +16,7 @@ HessianMode controls how second-order information structures the Newton step:
 
 SignalStrategy controls how raw gradient/Hessian signals are pre-processed:
     RAW:       use directly (Scheme B — Naive Newton)
-    EMA:       exponential moving average with bias correction (Scheme C)
+    EMA:       exponential moving average (bias correction configurable) (Scheme C)
     ADAM_NORM: Adam-style m1_hat / (√m2_hat + ε) normalization (Scheme D)
 
 Predefined optimizer schemes (configured via SecondOrderConfig):
@@ -33,10 +33,12 @@ Date: 2026-03-25
 """
 
 from abc import ABC, abstractmethod
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
+import numpy as np
 import torch
 
 from gsplat2ct.ops.data import Params, GradResult, HessResult
@@ -89,6 +91,7 @@ class FirstOrderConfig(OptimizerConfig):
     beta1: float = 0.9
     beta2: float = 0.999
     eps: float = 1e-8
+    verbose: bool = False
 
 
 @dataclass
@@ -112,6 +115,36 @@ class SecondOrderConfig(OptimizerConfig):
     beta1_h: float = 0.9
     beta2_h: float = 0.999
     eps_h: float = 1e-8
+
+    # Optional warmup beta schedule for grad/hess EMA-like first moments.
+    # When enabled, beta1 is scheduled from *_start to *_end during the first
+    # warmup_beta_steps optimization steps.
+    warmup_beta_enabled: bool = False
+    warmup_beta_schedule: str = "COSINE"  # options: COSINE | LINEAR
+    warmup_beta_steps: int = 0
+    warmup_beta1_g_start: float = 0.1
+    warmup_beta1_g_end: float = 0.9
+    warmup_beta1_h_start: float = 0.1
+    warmup_beta1_h_end: float = 0.9
+    # Recommended default for warmup-beta mode: disable bias correction.
+    warmup_beta_bias_correction: bool = False
+    # Verbose logs for beta warmup/reanneal schedule only.
+    warmup_beta_verbose: bool = False
+
+    # Topology-triggered damping reanneal.
+    # When enabled, after a split/duplicate/prune event damping is multiplied
+    # by ``topology_damping_reanneal_factor`` (e.g. 100x) and decays back to
+    # the base value over ``topology_damping_reanneal_steps`` optimizer steps.
+    # This stabilizes Newton updates right after the geometry changes when
+    # the diagonal Hessian is noisiest.
+    topology_damping_reanneal_enabled: bool = False
+    topology_damping_reanneal_factor: float = 100.0
+    topology_damping_reanneal_steps: int = 50
+    topology_damping_reanneal_schedule: str = "COSINE"  # COSINE | LINEAR | EXP
+    topology_damping_reanneal_verbose: bool = False
+
+    # Verbose per-parameter tensor dumps (optimizer-specific formatting).
+    verbose: bool = False
 
 
 # ============================================================================
@@ -149,6 +182,47 @@ class OptimizerBase(ABC):
 
     def load_state_dict(self, state: Dict) -> None:
         self._step_count = state["step_count"]
+
+    @staticmethod
+    def _tensor_quantile_str(x: torch.Tensor) -> str:
+        """Return a compact fixed-quantile summary for verbose logging."""
+        flat = x.detach().reshape(-1).to(torch.float64).cpu().numpy()
+        total = int(flat.size)
+        if total == 0:
+            return "empty"
+
+        finite_mask = np.isfinite(flat)
+        finite = flat[finite_mask]
+        n_finite = int(finite.size)
+        n_nan = int(np.isnan(flat).sum())
+        n_posinf = int(np.isposinf(flat).sum())
+        n_neginf = int(np.isneginf(flat).sum())
+
+        if n_finite == 0:
+            return (
+                "all_non_finite"
+                f" (numel={total}, nan={n_nan}, +inf={n_posinf}, -inf={n_neginf})"
+            )
+
+        q_values = np.percentile(
+            finite,
+            [0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
+        )
+        q_labels = [
+            "min", "p05", "p10", "p20", "p30", "p40", "p50",
+            "p60", "p70", "p80", "p90", "p95", "max",
+        ]
+        stats = ", ".join(
+            f"{label}={float(value):.4e}"
+            for label, value in zip(q_labels, q_values)
+        )
+
+        if n_finite != total:
+            return (
+                f"{stats}"
+                f" (numel={total}, finite={n_finite}, nan={n_nan}, +inf={n_posinf}, -inf={n_neginf})"
+            )
+        return f"{stats} (numel={total})"
 
 
 # ============================================================================
@@ -259,9 +333,27 @@ class FirstOrderOptimizerBase(OptimizerBase):
 
     # ---- optimisation step -------------------------------------------------
 
+    def _verbose_dump_step(
+        self,
+        *,
+        name: str,
+        grad: torch.Tensor,
+        update: torch.Tensor,
+        param_before: torch.Tensor,
+        param_after: torch.Tensor,
+    ) -> None:
+        if not bool(getattr(self.config, "verbose", False)):
+            return
+        print(f"[Adam][step={self._step_count}][{name}]")
+        print(f"  param_orig= {self._tensor_quantile_str(param_before)}")
+        print(f"  grad      = {self._tensor_quantile_str(grad)}")
+        print(f"  update    = {self._tensor_quantile_str(update)}")
+        print(f"  param_post= {self._tensor_quantile_str(param_after)}")
+
     def step(self) -> None:
         self._step_count += 1
         b1, b2, eps = self.config.beta1, self.config.beta2, self.config.eps
+        verbose = bool(getattr(self.config, "verbose", False))
 
         for name in self.param_names:
             if name not in self._grad:
@@ -281,8 +373,20 @@ class FirstOrderOptimizerBase(OptimizerBase):
 
             m1_hat = self._m1[name] / (1 - b1 ** self._step_count)
             m2_hat = self._m2[name] / (1 - b2 ** self._step_count)
+            update = -lr * m1_hat / (m2_hat.sqrt() + eps)
 
-            self.params.get(name).data -= lr * m1_hat / (m2_hat.sqrt() + eps)
+            p = self.params.get(name).data
+            param_before = p.clone() if verbose else p
+            p += update
+
+            if verbose:
+                self._verbose_dump_step(
+                    name=name,
+                    grad=g,
+                    update=update,
+                    param_before=param_before,
+                    param_after=p,
+                )
 
         self._apply_constraints()
 
@@ -345,6 +449,18 @@ class NewtonOptimizerBase(OptimizerBase):
         self._hess: Dict[str, torch.Tensor] = {}
         self._cross_hess: Dict[str, torch.Tensor] = {}
         self._moments: Dict[str, Dict[str, torch.Tensor]] = {}
+        # Anchor used to support repeated beta warmup restarts after topology changes.
+        self._beta_warmup_anchor_step: int = 0
+        self._beta_warmup_steps_override: Optional[int] = None
+        # Topology-triggered damping reanneal state.
+        # When active, effective damping = base_damping * multiplier(local_step),
+        # with multiplier decaying from ``_damping_reanneal_factor`` down to 1.0
+        # over ``_damping_reanneal_steps`` optimizer steps.
+        self._damping_reanneal_anchor_step: int = 0
+        self._damping_reanneal_factor: float = 1.0
+        self._damping_reanneal_steps: int = 0
+        self._damping_reanneal_schedule: str = "COSINE"
+        self._damping_reanneal_active: bool = False
 
     # ---- gradient / Hessian interface --------------------------------------
 
@@ -382,6 +498,241 @@ class NewtonOptimizerBase(OptimizerBase):
     def reset_moments(self) -> None:
         self._moments.clear()
         self._step_count = 0
+        self._beta_warmup_anchor_step = 0
+        self._beta_warmup_steps_override = None
+        self._damping_reanneal_anchor_step = 0
+        self._damping_reanneal_factor = 1.0
+        self._damping_reanneal_steps = 0
+        self._damping_reanneal_active = False
+
+    def restart_damping_reanneal(
+        self,
+        *,
+        factor: Optional[float] = None,
+        steps: Optional[int] = None,
+        schedule: Optional[str] = None,
+    ) -> None:
+        """Start a damping reanneal cycle anchored at the current step.
+
+        Effective damping becomes ``base_damping * multiplier(local_step)`` where
+        ``multiplier`` decays from ``factor`` down to 1.0 over ``steps`` optimizer
+        steps according to ``schedule``. The base damping (as modified by any
+        ``OptimizerScheduler``) is preserved; the reanneal is a multiplicative
+        transient on top of it.
+
+        Args:
+            factor: Peak damping multiplier right after restart (default
+                ``self.config.topology_damping_reanneal_factor``).
+            steps: Number of optimizer steps for the reanneal to decay back to
+                1.0 (default ``self.config.topology_damping_reanneal_steps``).
+            schedule: Decay shape: ``"COSINE"``, ``"LINEAR"``, or ``"EXP"``
+                (default ``self.config.topology_damping_reanneal_schedule``).
+        """
+        cfg_factor = float(
+            getattr(self.config, "topology_damping_reanneal_factor", 100.0)
+        )
+        cfg_steps = int(
+            getattr(self.config, "topology_damping_reanneal_steps", 50)
+        )
+        cfg_schedule = str(
+            getattr(self.config, "topology_damping_reanneal_schedule", "COSINE")
+        )
+        self._damping_reanneal_factor = (
+            float(factor) if factor is not None else cfg_factor
+        )
+        self._damping_reanneal_steps = max(
+            int(steps) if steps is not None else cfg_steps, 0
+        )
+        self._damping_reanneal_schedule = (
+            str(schedule).upper() if schedule is not None else str(cfg_schedule).upper()
+        )
+        self._damping_reanneal_anchor_step = int(self._step_count)
+        self._damping_reanneal_active = bool(
+            self._damping_reanneal_steps > 0 and self._damping_reanneal_factor > 1.0
+        )
+
+        if bool(getattr(self.config, "topology_damping_reanneal_verbose", False)):
+            mult = self._resolve_damping_multiplier()
+            print(
+                "[DampingReanneal] restart "
+                f"anchor_step={self._damping_reanneal_anchor_step}, "
+                f"factor={self._damping_reanneal_factor:.4g}, "
+                f"steps={self._damping_reanneal_steps}, "
+                f"schedule={self._damping_reanneal_schedule}, "
+                f"multiplier_now={mult:.4g}"
+            )
+
+    def _resolve_damping_multiplier(self) -> float:
+        """Return the current damping reanneal multiplier (>= 1.0).
+
+        Returns 1.0 when no reanneal is active or when the reanneal has
+        fully decayed.
+        """
+        if not self._damping_reanneal_active:
+            return 1.0
+        steps = int(self._damping_reanneal_steps)
+        if steps <= 0:
+            return 1.0
+        factor = float(self._damping_reanneal_factor)
+        if factor <= 1.0:
+            return 1.0
+
+        local_step = int(self._step_count) - int(self._damping_reanneal_anchor_step)
+        # local_step == 0 at the instant of restart, before any optimizer.step();
+        # local_step == 1 at the first step after restart (peak multiplier);
+        # local_step == steps at the end of the reanneal window (multiplier = 1).
+        if local_step <= 0:
+            return factor
+        if local_step >= steps:
+            self._damping_reanneal_active = False
+            return 1.0
+
+        denom = float(max(steps - 1, 1))
+        progress = float(local_step - 1) / denom if steps > 1 else 1.0
+        progress = max(0.0, min(progress, 1.0))
+
+        schedule = self._damping_reanneal_schedule.upper()
+        if schedule == "COSINE":
+            alpha = 0.5 * (1.0 + math.cos(math.pi * progress))  # 1 -> 0
+            mult = 1.0 + (factor - 1.0) * alpha
+        elif schedule == "LINEAR":
+            alpha = 1.0 - progress  # 1 -> 0
+            mult = 1.0 + (factor - 1.0) * alpha
+        elif schedule in ("EXP", "EXPONENTIAL", "GEOMETRIC"):
+            # Geometric (log-linear) decay: factor -> 1 in log space.
+            mult = factor ** (1.0 - progress)
+        else:
+            raise ValueError(
+                f"Unsupported damping reanneal schedule: {schedule}"
+            )
+        return float(mult)
+
+    def _effective_damping(self, name: str) -> float:
+        """Return base damping scaled by the current reanneal multiplier."""
+        base = float(self.config.get_damping(name))
+        return base * self._resolve_damping_multiplier()
+
+    def restart_beta_warmup(
+        self,
+        *,
+        reset_moments: bool = False,
+        warmup_steps: Optional[int] = None,
+    ) -> None:
+        """Restart beta warmup from current optimizer step.
+
+        Args:
+            reset_moments: Whether to clear grad/hess moments before reannealing.
+            warmup_steps: Optional per-restart warmup length override.
+        """
+        if reset_moments:
+            self._moments.clear()
+        self._beta_warmup_anchor_step = int(self._step_count)
+        self._beta_warmup_steps_override = (
+            None if warmup_steps is None else max(int(warmup_steps), 0)
+        )
+        if bool(getattr(self.config, "warmup_beta_verbose", False)):
+            beta_g, local_g, steps_g = self._resolve_beta1("grad", return_meta=True)
+            beta_h, local_h, steps_h = self._resolve_beta1("hess", return_meta=True)
+            print(
+                "[WarmupBeta] restart "
+                f"reset_moments={bool(reset_moments)}, "
+                f"anchor_step={self._beta_warmup_anchor_step}, "
+                f"local_step_g={local_g}/{max(steps_g, 1)}, "
+                f"local_step_h={local_h}/{max(steps_h, 1)}, "
+                f"beta_g={beta_g:.6f}, beta_h={beta_h:.6f}"
+            )
+
+    @staticmethod
+    def _append_zero_rows(state: torch.Tensor, n_new: int) -> torch.Tensor:
+        if n_new <= 0:
+            return state
+        pad_shape = (int(n_new),) + tuple(state.shape[1:])
+        pad = torch.zeros(pad_shape, device=state.device, dtype=state.dtype)
+        return torch.cat([state, pad], dim=0).contiguous()
+
+    @torch.no_grad()
+    def _migrate_moment_buckets(
+        self,
+        buckets: Dict[str, Dict[str, torch.Tensor]],
+        *,
+        duplicate_sel: Optional[torch.Tensor] = None,
+        split_keep_parent: Optional[torch.Tensor] = None,
+        split_children: int = 0,
+        prune_keep: Optional[torch.Tensor] = None,
+        append_new: int = 0,
+    ) -> None:
+        if not buckets:
+            return
+
+        for bucket_name in list(buckets.keys()):
+            slot = buckets.get(bucket_name)
+            if slot is None:
+                continue
+
+            drop_bucket = False
+            migrated_slot: Dict[str, torch.Tensor] = {}
+
+            for state_name, state_tensor in slot.items():
+                # Scalar tracking values (e.g. beta products) are global states
+                # and do not need per-Gaussian topology remapping.
+                if state_tensor.dim() == 0:
+                    migrated_slot[state_name] = state_tensor
+                    continue
+
+                state = state_tensor
+
+                if duplicate_sel is not None and duplicate_sel.numel() > 0:
+                    state = self._append_zero_rows(state, int(duplicate_sel.numel()))
+
+                if split_keep_parent is not None:
+                    keep_parent = split_keep_parent.to(device=state.device, dtype=torch.bool)
+                    if keep_parent.numel() != state.shape[0]:
+                        drop_bucket = True
+                        break
+                    state = state[keep_parent].contiguous()
+                    if split_children > 0:
+                        state = self._append_zero_rows(state, int(split_children))
+
+                if prune_keep is not None:
+                    keep = prune_keep.to(device=state.device, dtype=torch.bool)
+                    if keep.numel() != state.shape[0]:
+                        drop_bucket = True
+                        break
+                    state = state[keep].contiguous()
+
+                if append_new > 0:
+                    state = self._append_zero_rows(state, int(append_new))
+
+                migrated_slot[state_name] = state
+
+            if drop_bucket:
+                buckets.pop(bucket_name, None)
+            else:
+                buckets[bucket_name] = migrated_slot
+
+    @torch.no_grad()
+    def apply_topology_transition(
+        self,
+        *,
+        duplicate_sel: Optional[torch.Tensor] = None,
+        split_keep_parent: Optional[torch.Tensor] = None,
+        split_children: int = 0,
+        prune_keep: Optional[torch.Tensor] = None,
+        append_new: int = 0,
+    ) -> None:
+        """Migrate second-order moment buffers across topology edits.
+
+        Existing Gaussians keep their moment history. Newly added Gaussians
+        receive zero-initialized moments.
+        """
+        self._migrate_moment_buckets(
+            self._moments,
+            duplicate_sel=duplicate_sel,
+            split_keep_parent=split_keep_parent,
+            split_children=split_children,
+            prune_keep=prune_keep,
+            append_new=append_new,
+        )
 
     # ---- signal processing -------------------------------------------------
 
@@ -409,10 +760,10 @@ class NewtonOptimizerBase(OptimizerBase):
         if strategy == SignalStrategy.RAW:
             return buf
 
-        b1 = self.config.beta1_g if signal_type == "grad" else self.config.beta1_h
+        b1 = self._resolve_beta1(signal_type)
         b2 = self.config.beta2_g if signal_type == "grad" else self.config.beta2_h
         eps = self.config.eps_g if signal_type == "grad" else self.config.eps_h
-        t = self._step_count
+        apply_bias_correction = self._should_apply_moment_bias_correction()
 
         result = {}
         for name, val in buf.items():
@@ -421,28 +772,133 @@ class NewtonOptimizerBase(OptimizerBase):
                 self._moments[key] = {}
             m = self._moments[key]
 
-            if "m1" not in m:
+            if "m1" not in m or m["m1"].shape != val.shape:
                 m["m1"] = torch.zeros_like(val)
+                m.pop("m2", None)
+                m["beta1_prod"] = torch.ones((), device=val.device, dtype=val.dtype)
+                m["beta2_prod"] = torch.ones((), device=val.device, dtype=val.dtype)
+
+            if (
+                "beta1_prod" not in m
+                or m["beta1_prod"].device != val.device
+                or m["beta1_prod"].dtype != val.dtype
+            ):
+                m["beta1_prod"] = torch.ones((), device=val.device, dtype=val.dtype)
             m["m1"].mul_(b1).add_(val, alpha=1 - b1)
+            m["beta1_prod"] = m["beta1_prod"] * b1
+
+            if apply_bias_correction:
+                denom1 = (1.0 - m["beta1_prod"]).clamp_min(1e-12)
+                m1_used = m["m1"] / denom1
+            else:
+                m1_used = m["m1"]
 
             if strategy == SignalStrategy.EMA:
-                result[name] = m["m1"] / (1 - b1 ** t)
+                result[name] = m1_used
 
             elif strategy == SignalStrategy.ADAM_NORM:
-                if "m2" not in m:
+                if "m2" not in m or m["m2"].shape != val.shape:
                     m["m2"] = torch.zeros_like(val)
+                    m["beta2_prod"] = torch.ones((), device=val.device, dtype=val.dtype)
+                if (
+                    "beta2_prod" not in m
+                    or m["beta2_prod"].device != val.device
+                    or m["beta2_prod"].dtype != val.dtype
+                ):
+                    m["beta2_prod"] = torch.ones((), device=val.device, dtype=val.dtype)
                 m["m2"].mul_(b2).addcmul_(val, val, value=1 - b2)
+                m["beta2_prod"] = m["beta2_prod"] * b2
 
-                m1_hat = m["m1"] / (1 - b1 ** t)
-                m2_hat = m["m2"] / (1 - b2 ** t)
-                result[name] = m1_hat / (m2_hat.sqrt() + eps)
+                if apply_bias_correction:
+                    denom2 = (1.0 - m["beta2_prod"]).clamp_min(1e-12)
+                    m2_used = m["m2"] / denom2
+                else:
+                    m2_used = m["m2"]
+                result[name] = m1_used / (m2_used.sqrt() + eps)
 
         return result
+
+    def _resolve_beta1(
+        self, signal_type: str, return_meta: bool = False
+    ) -> float | tuple[float, int, int]:
+        """Resolve beta1, optionally using warmup_beta schedule."""
+        default_beta = self.config.beta1_g if signal_type == "grad" else self.config.beta1_h
+        if not bool(getattr(self.config, "warmup_beta_enabled", False)):
+            beta = float(default_beta)
+            if return_meta:
+                return beta, 0, 0
+            return beta
+
+        cfg_steps = max(int(getattr(self.config, "warmup_beta_steps", 0)), 0)
+        steps = (
+            cfg_steps
+            if self._beta_warmup_steps_override is None
+            else int(self._beta_warmup_steps_override)
+        )
+        if steps <= 0:
+            beta = float(default_beta)
+            if return_meta:
+                return beta, 0, 0
+            return beta
+
+        if signal_type == "grad":
+            beta_start = float(getattr(self.config, "warmup_beta1_g_start", default_beta))
+            beta_end = float(getattr(self.config, "warmup_beta1_g_end", default_beta))
+        else:
+            beta_start = float(getattr(self.config, "warmup_beta1_h_start", default_beta))
+            beta_end = float(getattr(self.config, "warmup_beta1_h_end", default_beta))
+
+        local_step = max(int(self._step_count) - int(self._beta_warmup_anchor_step), 0)
+        if steps == 1:
+            progress = 1.0
+        else:
+            progress = min(max((local_step - 1) / float(steps - 1), 0.0), 1.0)
+
+        schedule = str(getattr(self.config, "warmup_beta_schedule", "COSINE")).upper()
+        if schedule == "COSINE":
+            alpha = 0.5 * (1.0 - math.cos(math.pi * progress))
+        elif schedule == "LINEAR":
+            alpha = progress
+        else:
+            raise ValueError(f"Unsupported warmup_beta_schedule: {schedule}")
+
+        beta = beta_start + (beta_end - beta_start) * alpha
+        beta = float(min(max(beta, 1e-6), 1.0 - 1e-6))
+        if return_meta:
+            return beta, int(local_step), int(steps)
+        return beta
+
+    def _should_apply_moment_bias_correction(self) -> bool:
+        """Bias-correction policy for grad/hess moments."""
+        if bool(getattr(self.config, "warmup_beta_enabled", False)):
+            return bool(getattr(self.config, "warmup_beta_bias_correction", False))
+        return True
 
     # ---- optimisation step -------------------------------------------------
 
     def step(self) -> None:
         self._step_count += 1
+
+        if bool(getattr(self.config, "warmup_beta_verbose", False)):
+            beta_g, local_g, steps_g = self._resolve_beta1("grad", return_meta=True)
+            beta_h, local_h, steps_h = self._resolve_beta1("hess", return_meta=True)
+            print(
+                f"[WarmupBeta][step={self._step_count}] "
+                f"beta_g={beta_g:.6f} (local={local_g}/{max(steps_g, 1)}), "
+                f"beta_h={beta_h:.6f} (local={local_h}/{max(steps_h, 1)})"
+            )
+
+        if (
+            bool(getattr(self.config, "topology_damping_reanneal_verbose", False))
+            and self._damping_reanneal_active
+        ):
+            mult = self._resolve_damping_multiplier()
+            local = int(self._step_count) - int(self._damping_reanneal_anchor_step)
+            print(
+                f"[DampingReanneal][step={self._step_count}] "
+                f"multiplier={mult:.4g} (local={local}/"
+                f"{max(self._damping_reanneal_steps, 1)})"
+            )
 
         g_proc = self._process_signal(self._grad, "grad")
         h_proc = self._process_signal(self._hess, "hess")
@@ -466,7 +922,7 @@ class NewtonOptimizerBase(OptimizerBase):
             grad = g[name]
             hess_diag = self._extract_hess_diagonal(name, h[name])
             lr = self.config.get_lr(name)
-            damping = self.config.get_damping(name)
+            damping = self._effective_damping(name)
 
             delta = -grad / (damping + hess_diag.abs())
             self.params.get(name).data += lr * delta
@@ -478,7 +934,7 @@ class NewtonOptimizerBase(OptimizerBase):
                 continue
             grad = g[name]
             lr = self.config.get_lr(name)
-            damping = self.config.get_damping(name)
+            damping = self._effective_damping(name)
 
             if d == 1:
                 hess_val = self._extract_hess_diagonal(name, h[name])
@@ -510,7 +966,7 @@ class NewtonOptimizerBase(OptimizerBase):
 
         # Per-parameter-group damping diagonal: (D,)
         damping_diag = torch.cat([
-            torch.full((d,), self.config.get_damping(name),
+            torch.full((d,), self._effective_damping(name),
                        device=device, dtype=dtype)
             for name, d in zip(self.param_names, self.param_dims)
         ])
@@ -567,6 +1023,13 @@ class NewtonOptimizerBase(OptimizerBase):
             m_state[key] = {k: v.clone() for k, v in m.items()}
         return {
             "step_count": self._step_count,
+            "beta_warmup_anchor_step": int(self._beta_warmup_anchor_step),
+            "beta_warmup_steps_override": self._beta_warmup_steps_override,
+            "damping_reanneal_anchor_step": int(self._damping_reanneal_anchor_step),
+            "damping_reanneal_factor": float(self._damping_reanneal_factor),
+            "damping_reanneal_steps": int(self._damping_reanneal_steps),
+            "damping_reanneal_schedule": str(self._damping_reanneal_schedule),
+            "damping_reanneal_active": bool(self._damping_reanneal_active),
             "moments": m_state,
             "lr_map": self.config.lr_map.copy(),
             "damping_map": self.config.damping_map.copy(),
@@ -574,6 +1037,23 @@ class NewtonOptimizerBase(OptimizerBase):
 
     def load_state_dict(self, state: Dict) -> None:
         self._step_count = state["step_count"]
+        self._beta_warmup_anchor_step = int(state.get("beta_warmup_anchor_step", 0))
+        self._beta_warmup_steps_override = state.get("beta_warmup_steps_override", None)
+        self._damping_reanneal_anchor_step = int(
+            state.get("damping_reanneal_anchor_step", 0)
+        )
+        self._damping_reanneal_factor = float(
+            state.get("damping_reanneal_factor", 1.0)
+        )
+        self._damping_reanneal_steps = int(
+            state.get("damping_reanneal_steps", 0)
+        )
+        self._damping_reanneal_schedule = str(
+            state.get("damping_reanneal_schedule", "COSINE")
+        )
+        self._damping_reanneal_active = bool(
+            state.get("damping_reanneal_active", False)
+        )
         self._moments = {}
         for key, m in state["moments"].items():
             self._moments[key] = {k: v.clone() for k, v in m.items()}

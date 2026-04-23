@@ -1,0 +1,33 @@
+enabled: true
+verbose: true
+
+# Compute/use CUDA absgrad for densification when using first-order training
+# (``forward_backward1``). Second-order path has no absgrad tensor; falls back
+# to signed ``v_means2d`` like gsplat with absgrad=False.
+absgrad: true
+
+# Densification schedule (gsplat-style: first refine when
+# ``step > refine_start_iter`` and ``step % refine_every == 0``).
+refine_start_iter: 500
+refine_stop_iter: 5000
+refine_every: 100
+
+# density_min_threshold -> prune opacity threshold
+prune_opa_abs: 1.0e-5 # 1.0e-5
+
+# densify_grad_threshold
+grow_grad2d: 2.0e-4 # 2.0e-4
+grow_scale3d: 0.10 # 0.10
+
+# Limits
+min_remaining: 100
+max_gaussians: 500000
+
+# Split behavior:
+# child_scale = parent_scale / split_scales_div
+# 1.6 matches r2_gaussian split shrink factor (/ (0.8 * 2)).
+split_scales_div: 1.6
+
+# Notes:
+# - max_screen_size / max_scale are not exposed in current strategy config.
+

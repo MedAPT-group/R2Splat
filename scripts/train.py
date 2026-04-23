@@ -36,7 +36,12 @@ from gsplat2ct.vis.plotting import (
     save_projection_triplet,
     save_residual_slices_with_points,
 )
-from gsplat2ct.vis.video import ProjectionVideoRecorder, VideoVisConfig
+from gsplat2ct.vis.video import (
+    GaussianStateVideoConfig,
+    GaussianStateVideoRecorder,
+    ProjectionVideoRecorder,
+    VideoVisConfig,
+)
 from gsplat2ct.ops.gs3d_ct_rasterize import GS3DCTRasterizeCUDA
 from gsplat2ct.ops.gs3d_ct_voxelize import GS3DCTVoxelizeCUDA
 
@@ -169,6 +174,15 @@ def make_train_config(
         absgrad=bool(getattr(cfg, "strategy", None) is not None and getattr(cfg.strategy, "absgrad", False)),
     )
     return config
+
+
+def _extract_loss_triplet(fwd: ForwardResult) -> Tuple[float, float, float]:
+    """Read total / image / TV loss scalars from a forward result."""
+    return (
+        float(fwd.outputs["loss"].item()),
+        float(fwd.outputs["loss_image"].item()),
+        float(fwd.outputs["loss_tv"].item()),
+    )
 
 
 # =====================================================================
@@ -348,6 +362,44 @@ def build_optimizer(cfg: DictConfig, params: Params):
             "opacity": cfg.optim.damping_opacity,
         }
 
+        # Signal-processing hyper-parameters for Newton-family optimizers.
+        # For EMA strategy, only beta1_* is used.
+        signal_kwargs = dict(
+            beta1_g=float(getattr(cfg.optim, "beta1_g", 0.9)),
+            beta2_g=float(getattr(cfg.optim, "beta2_g", 0.999)),
+            eps_g=float(getattr(cfg.optim, "eps_g", 1e-8)),
+            beta1_h=float(getattr(cfg.optim, "beta1_h", 0.9)),
+            beta2_h=float(getattr(cfg.optim, "beta2_h", 0.999)),
+            eps_h=float(getattr(cfg.optim, "eps_h", 1e-8)),
+            warmup_beta_enabled=bool(getattr(cfg.optim, "warmup_beta_enabled", False)),
+            warmup_beta_schedule=str(getattr(cfg.optim, "warmup_beta_schedule", "COSINE")),
+            warmup_beta_steps=max(int(getattr(cfg.optim, "warmup_beta_steps", 0)), 0),
+            warmup_beta1_g_start=float(getattr(cfg.optim, "warmup_beta1_g_start", 0.1)),
+            warmup_beta1_g_end=float(getattr(cfg.optim, "warmup_beta1_g_end", 0.9)),
+            warmup_beta1_h_start=float(getattr(cfg.optim, "warmup_beta1_h_start", 0.1)),
+            warmup_beta1_h_end=float(getattr(cfg.optim, "warmup_beta1_h_end", 0.9)),
+            warmup_beta_bias_correction=bool(
+                getattr(cfg.optim, "warmup_beta_bias_correction", False)
+            ),
+            warmup_beta_verbose=bool(getattr(cfg.optim, "warmup_beta_verbose", False)),
+            topology_damping_reanneal_enabled=bool(
+                getattr(cfg.optim, "topology_damping_reanneal_enabled", False)
+            ),
+            topology_damping_reanneal_factor=float(
+                getattr(cfg.optim, "topology_damping_reanneal_factor", 100.0)
+            ),
+            topology_damping_reanneal_steps=max(
+                int(getattr(cfg.optim, "topology_damping_reanneal_steps", 50)),
+                0,
+            ),
+            topology_damping_reanneal_schedule=str(
+                getattr(cfg.optim, "topology_damping_reanneal_schedule", "COSINE")
+            ),
+            topology_damping_reanneal_verbose=bool(
+                getattr(cfg.optim, "topology_damping_reanneal_verbose", False)
+            ),
+        )
+
         second_order_optimizer = str(
             getattr(cfg.optim, "second_order_optimizer", "newton_diag_clamp")
         ).lower()
@@ -373,6 +425,8 @@ def build_optimizer(cfg: DictConfig, params: Params):
                 hess_mode=HessianMode.DIAGONAL,
                 grad_strategy=SignalStrategy[cfg.optim.grad_strategy],
                 hess_strategy=SignalStrategy[cfg.optim.hess_strategy],
+                verbose=bool(getattr(cfg.optim, "verbose", False)),
+                **signal_kwargs,
             )
             config.allow_negative_opacity = bool(getattr(cfg.optim, "allow_negative_opacity", False))
             return GS3DCTNewtonDiagClampOptimizer(params, config)
@@ -384,6 +438,8 @@ def build_optimizer(cfg: DictConfig, params: Params):
                 hess_mode=HessianMode[cfg.optim.hess_mode],
                 grad_strategy=SignalStrategy[cfg.optim.grad_strategy],
                 hess_strategy=SignalStrategy[cfg.optim.hess_strategy],
+                verbose=bool(getattr(cfg.optim, "verbose", False)),
+                **signal_kwargs,
             )
             config.allow_negative_opacity = bool(getattr(cfg.optim, "allow_negative_opacity", False))
             return GS3DCTNewtonOptimizer(params, config)
@@ -398,6 +454,7 @@ def build_optimizer(cfg: DictConfig, params: Params):
         beta1=cfg.optim.beta1,
         beta2=cfg.optim.beta2,
         eps=cfg.optim.eps,
+        verbose=bool(getattr(cfg.optim, "verbose", False)),
     )
     config.allow_negative_opacity = bool(getattr(cfg.optim, "allow_negative_opacity", False))
     return GS3DCTAdamOptimizer(params, config)
@@ -551,6 +608,29 @@ def train(cfg: DictConfig) -> None:
     from gsplat2ct.strategy import CompensationStrategy
     strategy = DefaultStrategy(getattr(cfg, "strategy", None) or {})
     compensate_strategy = CompensationStrategy(getattr(cfg, "compensate", None) or {})
+    topology_reanneal_enabled = bool(
+        getattr(cfg.optim, "topology_reanneal_enabled", False)
+    )
+    topology_reanneal_steps = max(
+        int(getattr(cfg.optim, "topology_reanneal_steps", 50)),
+        0,
+    )
+    topology_reanneal_reset_moments = bool(
+        getattr(cfg.optim, "topology_reanneal_reset_moments", False)
+    )
+    topology_damping_reanneal_enabled = bool(
+        getattr(cfg.optim, "topology_damping_reanneal_enabled", False)
+    )
+    topology_damping_reanneal_factor = float(
+        getattr(cfg.optim, "topology_damping_reanneal_factor", 100.0)
+    )
+    topology_damping_reanneal_steps = max(
+        int(getattr(cfg.optim, "topology_damping_reanneal_steps", 50)),
+        0,
+    )
+    topology_damping_reanneal_schedule = str(
+        getattr(cfg.optim, "topology_damping_reanneal_schedule", "COSINE")
+    )
 
     # ---- Visualization manager ----
     vis_cfg = getattr(cfg, "vis", None)
@@ -565,6 +645,37 @@ def train(cfg: DictConfig) -> None:
         frame_subdir=str(getattr(video_cfg_node, "frame_subdir", "video_frames")) if video_cfg_node is not None else "video_frames",
         output_name=str(getattr(video_cfg_node, "output_name", "projection_progress.mp4")) if video_cfg_node is not None else "projection_progress.mp4",
     )
+    gaussian_video_cfg_node = getattr(vis_cfg, "gaussian_state_video", None)
+    gaussian_opacity_vmin = None
+    gaussian_opacity_vmax = None
+    if gaussian_video_cfg_node is not None and getattr(gaussian_video_cfg_node, "opacity_vmin", None) is not None:
+        gaussian_opacity_vmin = float(getattr(gaussian_video_cfg_node, "opacity_vmin"))
+    if gaussian_video_cfg_node is not None and getattr(gaussian_video_cfg_node, "opacity_vmax", None) is not None:
+        gaussian_opacity_vmax = float(getattr(gaussian_video_cfg_node, "opacity_vmax"))
+
+    gaussian_video_vis_cfg = GaussianStateVideoConfig(
+        enabled=bool(getattr(gaussian_video_cfg_node, "enabled", False)) if gaussian_video_cfg_node is not None else False,
+        interval=int(getattr(gaussian_video_cfg_node, "interval", 5)) if gaussian_video_cfg_node is not None else 5,
+        fps=int(getattr(gaussian_video_cfg_node, "fps", 10)) if gaussian_video_cfg_node is not None else 10,
+        frame_subdir=str(getattr(gaussian_video_cfg_node, "frame_subdir", "gaussian_state_frames")) if gaussian_video_cfg_node is not None else "gaussian_state_frames",
+        output_name=str(getattr(gaussian_video_cfg_node, "output_name", "gaussian_state_progress.mp4")) if gaussian_video_cfg_node is not None else "gaussian_state_progress.mp4",
+        max_points=int(getattr(gaussian_video_cfg_node, "max_points", 3000)) if gaussian_video_cfg_node is not None else 3000,
+        point_size_min=float(getattr(gaussian_video_cfg_node, "point_size_min", 8.0)) if gaussian_video_cfg_node is not None else 8.0,
+        point_size_max=float(getattr(gaussian_video_cfg_node, "point_size_max", 120.0)) if gaussian_video_cfg_node is not None else 120.0,
+        use_log_scale_size=bool(getattr(gaussian_video_cfg_node, "use_log_scale_size", True)) if gaussian_video_cfg_node is not None else True,
+        axis_length_factor=float(getattr(gaussian_video_cfg_node, "axis_length_factor", 0.25)) if gaussian_video_cfg_node is not None else 0.25,
+        axis_length_min_ratio=float(getattr(gaussian_video_cfg_node, "axis_length_min_ratio", 0.002)) if gaussian_video_cfg_node is not None else 0.002,
+        axis_length_max_ratio=float(getattr(gaussian_video_cfg_node, "axis_length_max_ratio", 0.05)) if gaussian_video_cfg_node is not None else 0.05,
+        axis_alpha=float(getattr(gaussian_video_cfg_node, "axis_alpha", 0.45)) if gaussian_video_cfg_node is not None else 0.45,
+        axis_linewidth=float(getattr(gaussian_video_cfg_node, "axis_linewidth", 0.6)) if gaussian_video_cfg_node is not None else 0.6,
+        elev=float(getattr(gaussian_video_cfg_node, "elev", 20.0)) if gaussian_video_cfg_node is not None else 20.0,
+        azim=float(getattr(gaussian_video_cfg_node, "azim", 35.0)) if gaussian_video_cfg_node is not None else 35.0,
+        colormap=str(getattr(gaussian_video_cfg_node, "colormap", "viridis")) if gaussian_video_cfg_node is not None else "viridis",
+        opacity_activation=str(getattr(gaussian_video_cfg_node, "opacity_activation", "raw")) if gaussian_video_cfg_node is not None else "raw",
+        opacity_vmin=gaussian_opacity_vmin,
+        opacity_vmax=gaussian_opacity_vmax,
+    )
+
     video_recorder = ProjectionVideoRecorder(
         vis_cfg=video_vis_cfg,
         dataset=evalset,
@@ -574,7 +685,16 @@ def train(cfg: DictConfig) -> None:
         scale_max=cfg.model.scale_max,
         eps_blur=cfg.trainer.eps_blur,
     )
+    gaussian_video_recorder = GaussianStateVideoRecorder(
+        vis_cfg=gaussian_video_vis_cfg,
+        out_dir=vis_dir,
+        scale_min=cfg.model.scale_min,
+        scale_max=cfg.model.scale_max,
+        bbox=bbox,
+    )
     video_recorder.set_params(params)
+    gaussian_video_recorder.set_params(params)
+    strategy_debug_vis_dir = os.path.join(vis_dir, "strategy_debug")
 
     # ---- Training loop ----
     print("[5/5] Starting training...")
@@ -676,11 +796,24 @@ def train(cfg: DictConfig) -> None:
             fwd, grad = operator.forward_backward1(params, data_obj, op_config)
             optimizer.add_grad(grad)
 
+        loss_total, loss_img, loss_tv = _extract_loss_triplet(fwd)
+
+        # For densification stats, second-order path can optionally query
+        # first-order abs-grad aux tensors (v_means2d_abs) without changing
+        # second-order optimization signals.
+        strategy_grad_aux = grad
+        if (
+            use_second_order
+            and strategy.should_accumulate_grad_stats(step)
+            and bool(getattr(strategy, "absgrad", False))
+        ):
+            _, grad_first_order_aux = operator.forward_backward1(params, data_obj, op_config)
+            strategy_grad_aux = grad_first_order_aux
+
         # Strategy: gsplat-style grad2d/count accumulation + periodic refine
-        topology_changed = False
-        v_means2d = grad.get_aux("v_means2d")
-        v_means2d_abs = grad.get_aux("v_means2d_abs")
-        radii_2d = grad.get_aux("radii_2d")
+        v_means2d = strategy_grad_aux.get_aux("v_means2d")
+        v_means2d_abs = strategy_grad_aux.get_aux("v_means2d_abs")
+        radii_2d = strategy_grad_aux.get_aux("radii_2d")
         n_cameras = int(raw_batch["camtoworld"].shape[0])
         if strategy.should_accumulate_grad_stats(step):
             if v_means2d is not None and radii_2d is not None:
@@ -695,6 +828,27 @@ def train(cfg: DictConfig) -> None:
                 )
 
         if strategy.want_refine(step):
+            strategy_verbose = bool(getattr(strategy, "verbose", False))
+            n_before_refine = int(gp.num_gaussians)
+            _save_strategy_debug_visualization(
+                params=params,
+                cfg=cfg,
+                evalset=evalset,
+                vol_gt=vol_gt,
+                bbox=bbox,
+                volume_shape_wdh=volume_shape_wdh,
+                device=device,
+                out_dir=strategy_debug_vis_dir,
+                step=step,
+                phase="before",
+            )
+            if strategy_verbose:
+                print(
+                    f"[Strategy step {step}] loss_before_refine: "
+                    f"total={loss_total:.6f}, image={loss_img:.6f}, tv={loss_tv:.6f}, "
+                    f"N={n_before_refine}"
+                )
+
             grow_scale3d_abs = None
             if bbox is not None:
                 world_scale = (bbox[1] - bbox[0]).max().item()
@@ -714,7 +868,10 @@ def train(cfg: DictConfig) -> None:
                 step=step,
             )
             if changed:
-                if not use_second_order and hasattr(optimizer, "apply_topology_transition"):
+                # Clear only DefaultStrategy grad2d/count history and keep
+                # optimizer history through topology transition.
+                strategy.reset_grad_accumulator()
+                if hasattr(optimizer, "apply_topology_transition"):
                     optimizer.apply_topology_transition(
                         duplicate_sel=transition.duplicate_sel,
                         split_keep_parent=transition.split_keep_parent,
@@ -724,11 +881,55 @@ def train(cfg: DictConfig) -> None:
                 params = gp.to_params()
                 operator.initialize(params)
                 optimizer.params = params
-                if use_second_order:
-                    optimizer.reset_moments()
                 video_recorder.set_params(params)
+                gaussian_video_recorder.set_params(params)
                 optimizer.zero_grad()
-                topology_changed = True
+                if (
+                    use_second_order
+                    and topology_reanneal_enabled
+                    and hasattr(optimizer, "restart_beta_warmup")
+                ):
+                    optimizer.restart_beta_warmup(
+                        reset_moments=topology_reanneal_reset_moments,
+                        warmup_steps=topology_reanneal_steps,
+                    )
+                if (
+                    use_second_order
+                    and topology_damping_reanneal_enabled
+                    and hasattr(optimizer, "restart_damping_reanneal")
+                ):
+                    optimizer.restart_damping_reanneal(
+                        factor=topology_damping_reanneal_factor,
+                        steps=topology_damping_reanneal_steps,
+                        schedule=topology_damping_reanneal_schedule,
+                    )
+
+            _save_strategy_debug_visualization(
+                params=params,
+                cfg=cfg,
+                evalset=evalset,
+                vol_gt=vol_gt,
+                bbox=bbox,
+                volume_shape_wdh=volume_shape_wdh,
+                device=device,
+                out_dir=strategy_debug_vis_dir,
+                step=step,
+                phase="after",
+            )
+
+            if strategy_verbose:
+                if changed:
+                    fwd_after_refine = operator.forward_only(params, data_obj, op_config)
+                    post_total, post_img, post_tv = _extract_loss_triplet(fwd_after_refine)
+                else:
+                    post_total, post_img, post_tv = loss_total, loss_img, loss_tv
+                next_opt_step = int(getattr(optimizer, "_step_count", 0)) + 1
+                print(
+                    f"[Strategy step {step}] loss_before_optimizer_step: "
+                    f"total={post_total:.6f}, image={post_img:.6f}, tv={post_tv:.6f}, "
+                    f"N={gp.num_gaussians}, changed={bool(changed)}, "
+                    f"optimizer_step={next_opt_step}"
+                )
 
         if (
             compensate_strategy.should_resample(step)
@@ -768,17 +969,40 @@ def train(cfg: DictConfig) -> None:
             )
             if changed_comp:
                 strategy.reset_grad_accumulator()
-                if not use_second_order and hasattr(optimizer, "apply_topology_transition"):
+                applied_topology_transition = False
+                if hasattr(optimizer, "apply_topology_transition"):
                     n_added = max(int(gp.num_gaussians) - int(n_before_comp), 0)
                     optimizer.apply_topology_transition(append_new=n_added)
+                    applied_topology_transition = True
                 params = gp.to_params()
                 operator.initialize(params)
                 optimizer.params = params
-                if use_second_order:
+                if use_second_order and not applied_topology_transition and hasattr(
+                    optimizer, "reset_moments"
+                ):
                     optimizer.reset_moments()
                 video_recorder.set_params(params)
+                gaussian_video_recorder.set_params(params)
                 optimizer.zero_grad()
-                topology_changed = True
+                if (
+                    use_second_order
+                    and topology_reanneal_enabled
+                    and hasattr(optimizer, "restart_beta_warmup")
+                ):
+                    optimizer.restart_beta_warmup(
+                        reset_moments=topology_reanneal_reset_moments,
+                        warmup_steps=topology_reanneal_steps,
+                    )
+                if (
+                    use_second_order
+                    and topology_damping_reanneal_enabled
+                    and hasattr(optimizer, "restart_damping_reanneal")
+                ):
+                    optimizer.restart_damping_reanneal(
+                        factor=topology_damping_reanneal_factor,
+                        steps=topology_damping_reanneal_steps,
+                        schedule=topology_damping_reanneal_schedule,
+                    )
 
                 # Debug visualization after compensation (disabled).
                 # after_pred_proj, after_gt_proj = _render_eval_projection_single(
@@ -859,14 +1083,14 @@ def train(cfg: DictConfig) -> None:
                 #         slice_indices=slice_indices,
                 #     )
 
-        if not topology_changed:
-            optimizer.step()
-            optimizer.zero_grad()
+        # Align with r2_gaussian loop semantics: always advance one optimizer
+        # step per training iteration, even if topology changed this round.
+        # When topology changed, optimizer buffers were cleared above, so this
+        # step is intentionally a no-op update but still advances step_count.
+        optimizer.step()
+        optimizer.zero_grad()
 
         # Logging
-        loss_total = fwd.outputs["loss"].item()
-        loss_img = fwd.outputs["loss_image"].item()
-        loss_tv = fwd.outputs["loss_tv"].item()
         loss_history["total"].append(loss_total)
         loss_history["image"].append(loss_img)
         loss_history["tv"].append(loss_tv)
@@ -882,11 +1106,20 @@ def train(cfg: DictConfig) -> None:
             import wandb  # type: ignore
 
             if wandb.run is not None:
-                wandb.log({"train/num_gaussians": float(gp.num_gaussians)}, step=step)
+                wandb.log(
+                    {
+                        "train/loss_total": float(loss_total),
+                        "train/loss_image": float(loss_img),
+                        "train/loss_tv": float(loss_tv),
+                        "train/num_gaussians": float(gp.num_gaussians),
+                    },
+                    step=step,
+                )
         except ImportError:
             pass
 
         video_recorder.maybe_record_step(step)
+        gaussian_video_recorder.maybe_record_step(step)
 
         # Periodic evaluation
         if step > 0 and step % cfg.trainer.eval_interval == 0:
@@ -909,6 +1142,9 @@ def train(cfg: DictConfig) -> None:
     video_path = video_recorder.finalize()
     if video_path is not None:
         print(f"   [VideoVis] Saved mp4: {video_path}")
+    gaussian_video_path = gaussian_video_recorder.finalize()
+    if gaussian_video_path is not None:
+        print(f"   [GaussianStateVideo] Saved mp4: {gaussian_video_path}")
     print(f"\nTraining complete. Results in: {result_dir}")
 
 
@@ -999,6 +1235,57 @@ def _run_eval(
             wandb.log(log_dict, step=step)
     except ImportError:
         pass
+
+
+@torch.no_grad()
+def _save_strategy_debug_visualization(
+    *,
+    params: Params,
+    cfg: DictConfig,
+    evalset: CTImageDataset,
+    vol_gt: Optional[torch.Tensor],
+    bbox: Optional[torch.Tensor],
+    volume_shape_wdh: Optional[Tuple[int, int, int]],
+    device: torch.device,
+    out_dir: str,
+    step: int,
+    phase: str,
+) -> None:
+    """Save projection/volume snapshots for strategy before/after debugging."""
+    os.makedirs(out_dir, exist_ok=True)
+
+    proj_eval = ProjectionEvaluator(
+        params,
+        scale_min=cfg.model.scale_min,
+        scale_max=cfg.model.scale_max,
+        eps_blur=cfg.trainer.eps_blur,
+        ssim_window=cfg.trainer.window_size,
+    )
+    _proj_metrics, vis_pairs = proj_eval.evaluate(evalset, device)
+    if vis_pairs:
+        save_projection_comparison(
+            vis_pairs,
+            os.path.join(out_dir, f"proj_step_{step:06d}_{phase}.png"),
+            step=step,
+        )
+
+    if vol_gt is None or bbox is None or volume_shape_wdh is None:
+        return
+
+    vol_eval = VolumeEvaluator(
+        params,
+        scale_min=cfg.model.scale_min,
+        scale_max=cfg.model.scale_max,
+        eps3d=cfg.trainer.eps3d,
+        ssim_window=cfg.trainer.window_size,
+    )
+    vol_metrics, pred_vol = vol_eval.evaluate(vol_gt, bbox, volume_shape_wdh, device)
+    save_volume_comparison(
+        pred_vol,
+        vol_gt,
+        os.path.join(out_dir, f"vol_step_{step:06d}_{phase}.png"),
+        psnr_val=vol_metrics["psnr"],
+    )
 
 
 @torch.no_grad()

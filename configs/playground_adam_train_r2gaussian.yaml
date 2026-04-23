@@ -1,0 +1,44 @@
+# Toy playground profile using first-order Adam with r2gaussian-like
+# learning rates and exponential LR decay.
+#
+# Usage:
+#   python -m scripts.train --config-name playground_adam_train_r2gaussian_500
+
+defaults:
+  - base
+  - model: playground_simple_shapes
+  - trainer: playground_debug_50
+  - optim: r2gaussian_adam
+  - schedule: r2gaussian_exp
+  - exp: playground_simple_shapes_cone
+  - init: playground_file
+  - compensate: none
+  - strategy: playground
+  - vis: playground_debug_every_step
+  - _self_
+
+trainer:
+  max_steps: 10000
+  batch_size: 3
+  eval_interval: 100
+
+optim:
+  # Newton diagonal-clamp with EMA only on grad/hess signals.
+  # This avoids any post-delta update normalization (EMA/AdamNorm on update).
+  use_second_order: false
+  verbose: true
+
+  # Keep the same per-parameter update scales as playground_newton_train.
+  lr_means: 0.0002
+  lr_quats: 0.001
+  lr_scale_ori: 0.005
+  lr_opacity: 0.0005
+
+  allow_negative_opacity: false
+
+schedule:
+  enabled: true
+  lr:
+    type: "exp"
+    warmup_steps: 0
+    min_factor: 1.0

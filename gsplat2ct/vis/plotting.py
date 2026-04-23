@@ -11,6 +11,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 import numpy as np
 import torch
 
@@ -231,6 +232,8 @@ def save_loss_curve(
         ax.plot(values, label=name, alpha=0.8)
     ax.set_xlabel("Step")
     ax.set_ylabel("Loss")
+    ax.set_yscale("log")
+    ax.set_ylim(1e-4, 1.0)
     ax.set_title("Training Loss")
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -372,4 +375,262 @@ def save_residual_slices_with_points(
     fig.suptitle("Pre-compensation Residual with Sampled Points", fontsize=13)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.savefig(path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _quats_to_rotmats(quats: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """Convert unit quaternions (w, x, y, z) to rotation matrices (N, 3, 3)."""
+    if quats.ndim != 2 or quats.shape[1] != 4:
+        raise ValueError(f"quats must have shape (N, 4), got {tuple(quats.shape)}")
+
+    q = quats / quats.norm(dim=-1, keepdim=True).clamp_min(eps)
+    w, x, y, z = q.unbind(dim=-1)
+
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    xy = x * y
+    xz = x * z
+    yz = y * z
+    wx = w * x
+    wy = w * y
+    wz = w * z
+
+    r00 = 1.0 - 2.0 * (yy + zz)
+    r01 = 2.0 * (xy - wz)
+    r02 = 2.0 * (xz + wy)
+    r10 = 2.0 * (xy + wz)
+    r11 = 1.0 - 2.0 * (xx + zz)
+    r12 = 2.0 * (yz - wx)
+    r20 = 2.0 * (xz - wy)
+    r21 = 2.0 * (yz + wx)
+    r22 = 1.0 - 2.0 * (xx + yy)
+
+    row0 = torch.stack([r00, r01, r02], dim=-1)
+    row1 = torch.stack([r10, r11, r12], dim=-1)
+    row2 = torch.stack([r20, r21, r22], dim=-1)
+    return torch.stack([row0, row1, row2], dim=1)
+
+
+def _activate_opacity_values(opacity_raw: torch.Tensor, mode: str) -> torch.Tensor:
+    """Apply a configurable opacity activation for visualization only."""
+    mode_l = mode.lower()
+    if mode_l == "raw":
+        return opacity_raw
+    if mode_l == "sigmoid":
+        return torch.sigmoid(opacity_raw)
+    if mode_l == "softplus":
+        return torch.nn.functional.softplus(opacity_raw)
+    raise ValueError(f"Unsupported opacity activation mode: {mode}")
+
+
+def save_gaussian_state_3d_frame(
+    means: torch.Tensor,
+    quats: torch.Tensor,
+    scale_ori: torch.Tensor,
+    opacity_raw: torch.Tensor,
+    path: str,
+    *,
+    bbox: Optional[torch.Tensor] = None,
+    scale_min: float = 0.001,
+    scale_max: float = 1.0,
+    title: Optional[str] = None,
+    max_points: int = 3000,
+    point_size_min: float = 8.0,
+    point_size_max: float = 120.0,
+    use_log_scale_size: bool = True,
+    axis_length_factor: float = 0.25,
+    axis_length_min_ratio: float = 0.002,
+    axis_length_max_ratio: float = 0.05,
+    axis_alpha: float = 0.45,
+    axis_linewidth: float = 0.6,
+    elev: float = 20.0,
+    azim: float = 35.0,
+    colormap: str = "viridis",
+    opacity_activation: str = "raw",
+    opacity_vmin: Optional[float] = None,
+    opacity_vmax: Optional[float] = None,
+    dpi: int = 140,
+) -> None:
+    """Save one 3-D frame of Gaussian states for optimization stability tracking.
+
+    Visual channels:
+    - point position: Gaussian means in world-space
+    - point size: mean activated scale (optionally logarithmic)
+    - point color: activated opacity
+    - tiny local XYZ axes: quaternion orientation
+
+    Axes limits are fixed by ``bbox`` to keep temporal consistency in videos.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    means_t = means.detach().cpu().float()
+    quats_t = quats.detach().cpu().float()
+    scale_t = scale_ori.detach().cpu().float()
+    opacity_t = opacity_raw.detach().cpu().float().reshape(-1)
+
+    n_total = int(means_t.shape[0])
+    if n_total == 0:
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(111, projection="3d")
+        if bbox is not None:
+            bb = bbox.detach().cpu().float().numpy()
+            mins = bb[0]
+            maxs = bb[1]
+        else:
+            mins = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
+            maxs = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        ax.set_xlim(float(mins[0]), float(maxs[0]))
+        ax.set_ylim(float(mins[1]), float(maxs[1]))
+        ax.set_zlim(float(mins[2]), float(maxs[2]))
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.view_init(elev=float(elev), azim=float(azim))
+        ax.set_title(title if title is not None else "Gaussian State (empty)")
+        plt.tight_layout()
+        plt.savefig(path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    if max_points > 0 and n_total > max_points:
+        keep_idx = torch.linspace(0, n_total - 1, steps=max_points).long()
+        means_t = means_t[keep_idx]
+        quats_t = quats_t[keep_idx]
+        scale_t = scale_t[keep_idx]
+        opacity_t = opacity_t[keep_idx]
+
+    n_vis = int(means_t.shape[0])
+
+    if bbox is not None:
+        bb = bbox.detach().cpu().float().numpy()
+        mins = bb[0].astype(np.float64)
+        maxs = bb[1].astype(np.float64)
+    else:
+        mins = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
+        maxs = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+
+    ranges = maxs - mins
+    for i in range(3):
+        if (not np.isfinite(ranges[i])) or float(ranges[i]) <= 1e-8:
+            center = 0.5 * (float(mins[i]) + float(maxs[i]))
+            mins[i] = center - 0.5
+            maxs[i] = center + 0.5
+            ranges[i] = 1.0
+    scene_extent = float(np.max(ranges))
+
+    scale_activated = float(scale_min) + (float(scale_max) - float(scale_min)) * torch.sigmoid(scale_t)
+    mean_scale = scale_activated.mean(dim=-1).clamp_min(1e-12)
+
+    if use_log_scale_size:
+        log_min = float(np.log10(max(float(scale_min), 1e-12)))
+        log_max = float(np.log10(max(float(scale_max), float(scale_min) + 1e-12)))
+        denom = max(log_max - log_min, 1e-12)
+        norm = (torch.log10(mean_scale) - log_min) / denom
+    else:
+        denom = max(float(scale_max) - float(scale_min), 1e-12)
+        norm = (mean_scale - float(scale_min)) / denom
+    norm = norm.clamp(0.0, 1.0)
+    marker_sizes = float(point_size_min) + norm * (float(point_size_max) - float(point_size_min))
+
+    rotmats = _quats_to_rotmats(quats_t)
+    # Columns of R are local basis vectors transformed to world-space.
+    axis_dirs = rotmats.transpose(1, 2)
+
+    axis_lengths = mean_scale * float(axis_length_factor)
+    axis_lengths = axis_lengths.clamp(
+        min=float(axis_length_min_ratio) * scene_extent,
+        max=float(axis_length_max_ratio) * scene_extent,
+    )
+
+    endpoints_x = means_t + axis_dirs[:, 0, :] * axis_lengths.unsqueeze(-1)
+    endpoints_y = means_t + axis_dirs[:, 1, :] * axis_lengths.unsqueeze(-1)
+    endpoints_z = means_t + axis_dirs[:, 2, :] * axis_lengths.unsqueeze(-1)
+    seg_x = torch.stack([means_t, endpoints_x], dim=1).numpy()
+    seg_y = torch.stack([means_t, endpoints_y], dim=1).numpy()
+    seg_z = torch.stack([means_t, endpoints_z], dim=1).numpy()
+
+    opacity_activated = _activate_opacity_values(opacity_t, opacity_activation)
+    opacity_np = opacity_activated.detach().cpu().numpy()
+
+    if opacity_vmin is None:
+        cmin = float(np.percentile(opacity_np, 1.0))
+    else:
+        cmin = float(opacity_vmin)
+    if opacity_vmax is None:
+        cmax = float(np.percentile(opacity_np, 99.0))
+    else:
+        cmax = float(opacity_vmax)
+
+    if (not np.isfinite(cmin)) or (not np.isfinite(cmax)) or cmax <= cmin:
+        cmin = float(np.nanmin(opacity_np)) if np.isfinite(np.nanmin(opacity_np)) else 0.0
+        cmax = float(np.nanmax(opacity_np)) if np.isfinite(np.nanmax(opacity_np)) else 1.0
+        if cmax <= cmin:
+            cmax = cmin + 1e-6
+
+    means_np = means_t.numpy()
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    scatter = ax.scatter(
+        means_np[:, 0],
+        means_np[:, 1],
+        means_np[:, 2],
+        s=marker_sizes.numpy(),
+        c=opacity_np,
+        cmap=colormap,
+        vmin=cmin,
+        vmax=cmax,
+        alpha=0.95,
+        linewidths=0.0,
+        depthshade=False,
+    )
+
+    ax.add_collection3d(
+        Line3DCollection(
+            seg_x,
+            colors="#ef4444",
+            linewidths=float(axis_linewidth),
+            alpha=float(axis_alpha),
+        )
+    )
+    ax.add_collection3d(
+        Line3DCollection(
+            seg_y,
+            colors="#22c55e",
+            linewidths=float(axis_linewidth),
+            alpha=float(axis_alpha),
+        )
+    )
+    ax.add_collection3d(
+        Line3DCollection(
+            seg_z,
+            colors="#3b82f6",
+            linewidths=float(axis_linewidth),
+            alpha=float(axis_alpha),
+        )
+    )
+
+    ax.set_xlim(float(mins[0]), float(maxs[0]))
+    ax.set_ylim(float(mins[1]), float(maxs[1]))
+    ax.set_zlim(float(mins[2]), float(maxs[2]))
+    ax.set_box_aspect((float(ranges[0]), float(ranges[1]), float(ranges[2])))
+    ax.view_init(elev=float(elev), azim=float(azim))
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+
+    ax.set_title(title if title is not None else "Gaussian State")
+    ax.text2D(
+        0.02,
+        0.98,
+        f"visible={n_vis}/{n_total}",
+        transform=ax.transAxes,
+        va="top",
+    )
+    colorbar = fig.colorbar(scatter, ax=ax, fraction=0.03, pad=0.02)
+    colorbar.set_label(f"Opacity ({opacity_activation})")
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)

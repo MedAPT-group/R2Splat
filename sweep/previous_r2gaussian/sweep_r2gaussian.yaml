@@ -22,11 +22,11 @@
 #   `q_log_uniform_values` + `q` in their sweep config docs.
 
 entity: 810364379denveryi-eth-zurich
-project: gsplat2ct
+project: gsplat2ct-75view
 
 program: scripts/train.py
 method: random
-run_cap: 125
+run_cap: 400
 metric:
   name: vol/psnr
   goal: maximize
@@ -34,41 +34,44 @@ metric:
 parameters:
   exp.data_dir:
     values:
-      - "/home/chengzyi/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone"
+      - "/home/chengzyi/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_75_angle_360/0_chest_cone"
   exp.result_dir:
     values:
-      - "output/r2gaussian_like_sweep_6params"
+      - "output/r2gaussian_like_sweep_75view"
 
   # Use precomputed init_<scene>.npy instead of online reconstruction.
-  init.source:
-    values:
-      - file
-
   optim.lr_means:
     distribution: log_uniform_values
-    min: 5.0e-5
-    max: 2.0e-3
+    min: 1.0e-5
+    max: 1.0e-2
 
   optim.lr_quats:
     distribution: log_uniform_values
-    min: 3.0e-4
-    max: 3.0e-2
+    min: 1.0e-5
+    max: 1.0e-2
 
   optim.lr_scale_ori:
     distribution: log_uniform_values
-    min: 1.0e-4
-    max: 1.0e-3
+    min: 1.0e-5
+    max: 1.0e-2
 
   optim.lr_opacity:
     distribution: log_uniform_values
-    min: 2.0e-4
-    max: 2.0e-3
+    min: 1.0e-5
+    max: 1.0e-2
 
   # strategy.grow2d / strategy.grow3d (actual config keys below)
   strategy.grow_grad2d:
-    distribution: uniform
-    min: 1.0e-4
-    max: 5.0e-4
+    values:
+      - 2.0e-4
+      - 3.0e-4
+      - 5.0e-4
+
+  strategy.prune_opa_abs:
+    values:
+      - 1.0e-5
+      - 5.0e-5
+      - 1.0e-4
 
 
 command:

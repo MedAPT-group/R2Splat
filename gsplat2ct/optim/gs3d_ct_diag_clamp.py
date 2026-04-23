@@ -94,9 +94,79 @@ class GS3DCTNewtonDiagClampOptimizer(NewtonOptimizerBase):
         super().__init__(params, config, PARAM_NAMES, PARAM_DIMS, cross_hess_names=[])
         self.config: DiagonalClampSecondOrderConfig = config
 
+    def _verbose_dump_step(
+        self,
+        *,
+        name: str,
+        grad_raw: torch.Tensor,
+        grad_proc: torch.Tensor,
+        hess_raw_diag: torch.Tensor,
+        hess_proc_diag: torch.Tensor,
+        hess_clamped: torch.Tensor,
+        delta: torch.Tensor,
+        update_raw: torch.Tensor,
+        update: torch.Tensor,
+        hess_clamp_hits: int,
+        hess_total: int,
+        update_clip_hits: int,
+        update_total: int,
+        clamp_min: float,
+        max_update: float,
+        update_clip_enabled: bool,
+        param_before: torch.Tensor,
+        param_after: torch.Tensor,
+    ) -> None:
+        if not bool(getattr(self.config, "verbose", False)):
+            return
+
+        print(f"[NewtonDiagClamp][step={self._step_count}][{name}]")
+        print(f"  param_orig= {self._tensor_quantile_str(param_before)}")
+        print(f"  grad_raw  = {self._tensor_quantile_str(grad_raw)}")
+        print(f"  grad_proc = {self._tensor_quantile_str(grad_proc)}")
+        print(f"  hess_raw  = {self._tensor_quantile_str(hess_raw_diag)}")
+        print(f"  hess_proc = {self._tensor_quantile_str(hess_proc_diag)}")
+        print(f"  h_clamped = {self._tensor_quantile_str(hess_clamped)}")
+        print(f"  delta     = {self._tensor_quantile_str(delta)}")
+        print(f"  update_raw= {self._tensor_quantile_str(update_raw)}")
+        print(f"  update    = {self._tensor_quantile_str(update)}")
+        print(
+            "  h_clamp_hits"
+            f"= {hess_clamp_hits}/{hess_total}"
+            f" (clamp_min={clamp_min:.4e})"
+        )
+        if update_clip_enabled:
+            print(
+                "  update_clip_hits"
+                f"= {update_clip_hits}/{update_total}"
+                f" (max_update={max_update:.4e})"
+            )
+        else:
+            print(f"  update_clip_hits= {update_clip_hits}/{update_total} (disabled)")
+        print(f"  param_post= {self._tensor_quantile_str(param_after)}")
+
     def step(self) -> None:
         """Process signals and apply per-element diagonal-clamped Newton step."""
         self._step_count += 1
+        if bool(getattr(self.config, "warmup_beta_verbose", False)):
+            beta_g, local_g, steps_g = self._resolve_beta1("grad", return_meta=True)
+            beta_h, local_h, steps_h = self._resolve_beta1("hess", return_meta=True)
+            print(
+                f"[WarmupBeta][step={self._step_count}] "
+                f"beta_g={beta_g:.6f} (local={local_g}/{max(steps_g, 1)}), "
+                f"beta_h={beta_h:.6f} (local={local_h}/{max(steps_h, 1)})"
+            )
+
+        if (
+            bool(getattr(self.config, "topology_damping_reanneal_verbose", False))
+            and self._damping_reanneal_active
+        ):
+            mult = self._resolve_damping_multiplier()
+            local = int(self._step_count) - int(self._damping_reanneal_anchor_step)
+            print(
+                f"[DampingReanneal][step={self._step_count}] "
+                f"multiplier={mult:.4g} (local={local}/"
+                f"{max(self._damping_reanneal_steps, 1)})"
+            )
 
         g_proc = self._process_signal(self._grad, "grad")
         h_proc = self._process_signal(self._hess, "hess")
@@ -105,22 +175,57 @@ class GS3DCTNewtonDiagClampOptimizer(NewtonOptimizerBase):
             if name not in g_proc or name not in h_proc:
                 continue
 
+            grad_raw = self._grad[name]
             grad = g_proc[name]
+
+            hess_raw_diag = self._extract_hess_diagonal(name, self._hess[name])
             hess_diag = self._extract_hess_diagonal(name, h_proc[name])
 
             lr = self.config.get_lr(name)
-            damping = self.config.get_damping(name)
+            damping = self._effective_damping(name)
             clamp_min = self.config.get_clamp(name)
             max_update = self.config.get_max_update(name)
+            verbose = bool(getattr(self.config, "verbose", False))
 
             hess_clamped = torch.clamp(hess_diag, min=clamp_min)
+            hess_clamp_hits = int((hess_diag < clamp_min).sum().item())
+            hess_total = int(hess_diag.numel())
             delta = -grad / (damping + hess_clamped)
-            update = lr * delta
+            update_raw = lr * delta
+            update = update_raw
+            update_total = int(update_raw.numel())
+            update_clip_hits = 0
+            update_clip_enabled = bool(math.isfinite(max_update) and max_update > 0.0)
 
-            if math.isfinite(max_update) and max_update > 0.0:
-                update = torch.clamp(update, min=-max_update, max=max_update)
+            if update_clip_enabled:
+                update_clip_hits = int((update_raw.abs() > max_update).sum().item())
+                update = torch.clamp(update_raw, min=-max_update, max=max_update)
 
-            self.params.get(name).data += update
+            p = self.params.get(name).data
+            param_before = p.clone() if verbose else p
+            p += update
+
+            if verbose:
+                self._verbose_dump_step(
+                    name=name,
+                    grad_raw=grad_raw,
+                    grad_proc=grad,
+                    hess_raw_diag=hess_raw_diag,
+                    hess_proc_diag=hess_diag,
+                    hess_clamped=hess_clamped,
+                    delta=delta,
+                    update_raw=update_raw,
+                    update=update,
+                    hess_clamp_hits=hess_clamp_hits,
+                    hess_total=hess_total,
+                    update_clip_hits=update_clip_hits,
+                    update_total=update_total,
+                    clamp_min=clamp_min,
+                    max_update=max_update,
+                    update_clip_enabled=update_clip_enabled,
+                    param_before=param_before,
+                    param_after=p,
+                )
 
         self._apply_constraints()
 

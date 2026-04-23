@@ -3,8 +3,9 @@
 #
 #SBATCH --job-name=wb_r2gauss_1g
 #SBATCH --time=24:00:00
-#SBATCH --mem-per-cpu=8000M
-#SBATCH --ntasks=8
+#SBATCH --mem=10G
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH -o /home/chengzyi/myterminus/code/gsplat-3dgs2ct/logs/sweep_agent_%j.log
 
@@ -29,7 +30,7 @@ fi
 cd /home/chengzyi/myterminus/code/gsplat-3dgs2ct
 mkdir -p logs
 
-SWEEP_ID="${SWEEP_ID:-810364379denveryi-eth-zurich/gsplat2ct/l4jci68n}"
+SWEEP_ID="${SWEEP_ID:-810364379denveryi-eth-zurich/gsplat2ct-75view/tb9nzko3}"
 if [[ "${SWEEP_ID}" == *"YOUR_"* ]] || [[ -z "${SWEEP_ID}" ]]; then
   echo "ERROR: Set SWEEP_ID to the value from: wandb sweep sweep/previous_r2gaussian/sweep_r2gaussian.yaml" >&2
   exit 1

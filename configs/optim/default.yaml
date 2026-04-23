@@ -28,6 +28,19 @@ second_order_optimizer: "newton_diag_clamp" # options: newton_diag_clamp | newto
 hess_mode: "DIAGONAL"
 grad_strategy: "RAW"
 hess_strategy: "RAW"
+# Optional beta warmup for grad/hess EMA-like first moments.
+# Typical usage: start at low beta for fast response, then ramp to high beta
+# for stronger denoising.
+warmup_beta_enabled: false
+warmup_beta_schedule: "COSINE" # options: COSINE | LINEAR
+warmup_beta_steps: 0
+warmup_beta1_g_start: 0.1
+warmup_beta1_g_end: 0.9
+warmup_beta1_h_start: 0.1
+warmup_beta1_h_end: 0.9
+# In warmup-beta mode, default is no bias correction as requested.
+warmup_beta_bias_correction: false
+verbose: false
 damping_means: 1.0e-3
 damping_quats: 1.0e-3
 damping_scale_ori: 1.0e-3

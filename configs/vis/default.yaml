@@ -15,3 +15,30 @@ video:
   value_max: 1.0
   frame_subdir: "video_frames"
   output_name: "projection_progress.mp4"
+
+# 3-D Gaussian state video (means/scales/rotations/opacities).
+# Axes are fixed to bbox (or [-1,1] fallback) for temporal consistency.
+gaussian_state_video:
+  enabled: false
+  interval: 5
+  fps: 10
+  frame_subdir: "gaussian_state_frames"
+  output_name: "gaussian_state_progress.mp4"
+
+  max_points: 3000
+  point_size_min: 8.0
+  point_size_max: 120.0
+  use_log_scale_size: true
+
+  axis_length_factor: 0.25
+  axis_length_min_ratio: 0.002
+  axis_length_max_ratio: 0.05
+  axis_alpha: 0.45
+  axis_linewidth: 0.6
+
+  elev: 20.0
+  azim: 35.0
+  colormap: "viridis"
+  opacity_activation: "raw"
+  opacity_vmin: null
+  opacity_vmax: null
