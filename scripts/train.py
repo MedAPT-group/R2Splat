@@ -346,6 +346,14 @@ def build_optimizer(cfg: DictConfig, params: Params):
         DiagonalClampSecondOrderConfig,
         GS3DCTNewtonDiagClampOptimizer,
     )
+    from gsplat2ct.optim.gs3d_ct_kfac import (
+        KFACSecondOrderConfig,
+        GS3DCTKFACOptimizer,
+    )
+    from gsplat2ct.optim.gs3d_ct_reduced import (
+        ReducedNewtonConfig,
+        GS3DCTReducedNewtonOptimizer,
+    )
 
     lr_map = {
         "means": cfg.optim.lr_means,
@@ -444,9 +452,112 @@ def build_optimizer(cfg: DictConfig, params: Params):
             config.allow_negative_opacity = bool(getattr(cfg.optim, "allow_negative_opacity", False))
             return GS3DCTNewtonOptimizer(params, config)
 
+        if second_order_optimizer in {"reduced_newton", "newton_reduced", "gs3d_reduced"}:
+            clamp_map = {
+                "means": float(getattr(cfg.optim, "clamp_means", 1e-8)),
+                "quats": float(getattr(cfg.optim, "clamp_quats", 1e-8)),
+                "scale_ori": float(getattr(cfg.optim, "clamp_scale_ori", 1e-8)),
+                "opacity": float(getattr(cfg.optim, "clamp_opacity", 1e-8)),
+            }
+            max_update_map = {
+                "means": float(getattr(cfg.optim, "max_update_means", float("inf"))),
+                "quats": float(getattr(cfg.optim, "max_update_quats", float("inf"))),
+                "scale_ori": float(getattr(cfg.optim, "max_update_scale_ori", float("inf"))),
+                "opacity": float(getattr(cfg.optim, "max_update_opacity", float("inf"))),
+            }
+            config = ReducedNewtonConfig(
+                lr_map=lr_map,
+                damping_map=damping_map,
+                clamp_map=clamp_map,
+                max_update_map=max_update_map,
+                svd_threshold=float(getattr(cfg.optim, "reduced_svd_threshold", 1e-8)),
+                max_scale_rank=int(getattr(cfg.optim, "reduced_max_scale_rank", 2)),
+                max_rotation_angle=float(getattr(cfg.optim, "max_rotation_angle", 5.0e-2)),
+                allow_negative_opacity=bool(getattr(cfg.optim, "allow_negative_opacity", False)),
+                min_opacity=float(getattr(cfg.optim, "min_opacity", 1.0e-4)),
+                means_bound=float(getattr(cfg.optim, "means_bound", 1.0)),
+                verbose=bool(getattr(cfg.optim, "verbose", False)),
+            )
+            return GS3DCTReducedNewtonOptimizer(params, config)
+
+        if second_order_optimizer in {"kfac", "empirical_fisher", "ef"}:
+            # K-FAC / Empirical-Fisher optimizer. Does not consume the true
+            # Hessian, so its ``needs_hessian`` attribute is False and the
+            # training loop below falls back to forward_backward1.
+            ema_decay_map = {
+                "means": float(getattr(cfg.optim, "ema_decay_means", 0.95)),
+                "quats": float(getattr(cfg.optim, "ema_decay_quats", 0.95)),
+                "scale_ori": float(getattr(cfg.optim, "ema_decay_scale_ori", 0.95)),
+                "opacity": float(getattr(cfg.optim, "ema_decay_opacity", 0.95)),
+            }
+            grad_ema_decay_map = {
+                "means": float(getattr(cfg.optim, "grad_ema_decay_means", 0.9)),
+                "quats": float(getattr(cfg.optim, "grad_ema_decay_quats", 0.9)),
+                "scale_ori": float(getattr(cfg.optim, "grad_ema_decay_scale_ori", 0.9)),
+                "opacity": float(getattr(cfg.optim, "grad_ema_decay_opacity", 0.9)),
+            }
+            eig_clip_map = {
+                "means": float(getattr(cfg.optim, "eig_clip_means", 0.0)),
+                "quats": float(getattr(cfg.optim, "eig_clip_quats", 0.0)),
+                "scale_ori": float(getattr(cfg.optim, "eig_clip_scale_ori", 0.0)),
+                "opacity": float(getattr(cfg.optim, "eig_clip_opacity", 0.0)),
+            }
+            max_update_map = {
+                "means": float(getattr(cfg.optim, "max_update_means", float("inf"))),
+                "quats": float(getattr(cfg.optim, "max_update_quats", float("inf"))),
+                "scale_ori": float(getattr(cfg.optim, "max_update_scale_ori", float("inf"))),
+                "opacity": float(getattr(cfg.optim, "max_update_opacity", float("inf"))),
+            }
+            damping_rel_map = {
+                "means": float(getattr(cfg.optim, "damping_rel_means", 0.1)),
+                "quats": float(getattr(cfg.optim, "damping_rel_quats", 0.1)),
+                "scale_ori": float(getattr(cfg.optim, "damping_rel_scale_ori", 0.1)),
+                "opacity": float(getattr(cfg.optim, "damping_rel_opacity", 0.1)),
+            }
+            kfac_mode = str(getattr(cfg.optim, "kfac_mode", "per_param_group")).lower()
+            if kfac_mode not in ("per_gaussian", "per_param_group"):
+                raise ValueError(
+                    f"Unknown optim.kfac_mode={kfac_mode}. "
+                    "Use 'per_gaussian' or 'per_param_group'."
+                )
+            # KFAC does not consume the signal_kwargs beta1_g / beta2_g etc.
+            # (it uses its own ema_decay_map), but we accept them so that the
+            # shared SecondOrderConfig machinery (warmup-beta logging, damping
+            # reanneal, etc.) continues to function.
+            config = KFACSecondOrderConfig(
+                lr_map=lr_map,
+                damping_map=damping_map,
+                damping_mode=str(
+                    getattr(cfg.optim, "damping_mode", "absolute")
+                ).lower(),
+                damping_rel_map=damping_rel_map,
+                warmup_damping_floor=float(
+                    getattr(cfg.optim, "warmup_damping_floor", 0.0)
+                ),
+                warmup_match_fisher_scale=bool(
+                    getattr(cfg.optim, "warmup_match_fisher_scale", False)
+                ),
+                ema_decay_map=ema_decay_map,
+                grad_ema_decay_map=grad_ema_decay_map,
+                eig_clip_map=eig_clip_map,
+                max_update_map=max_update_map,
+                mode=kfac_mode,
+                bias_correction=bool(getattr(cfg.optim, "bias_correction", True)),
+                min_step_for_fisher=int(getattr(cfg.optim, "min_step_for_fisher", 0)),
+                hess_mode=HessianMode.BLOCK,
+                grad_strategy=SignalStrategy.RAW,
+                hess_strategy=SignalStrategy.RAW,
+                verbose=bool(getattr(cfg.optim, "verbose", False)),
+                **signal_kwargs,
+            )
+            config.allow_negative_opacity = bool(
+                getattr(cfg.optim, "allow_negative_opacity", False)
+            )
+            return GS3DCTKFACOptimizer(params, config)
+
         raise ValueError(
             f"Unknown optim.second_order_optimizer={second_order_optimizer}. "
-            "Use one of: newton_diag_clamp, newton."
+            "Use one of: newton_diag_clamp, newton, reduced_newton, kfac."
         )
 
     config = FirstOrderConfig(
@@ -597,7 +708,21 @@ def train(cfg: DictConfig) -> None:
     print("[4/5] Creating optimizer...")
     optimizer = build_optimizer(cfg, params)
     use_second_order = cfg.optim.use_second_order
-    print(f"   Mode: {'Newton (second-order)' if use_second_order else 'Adam (first-order)'}")
+    # Some second-order optimizers (e.g. KFAC / Empirical Fisher) only consume
+    # first-order gradients. They advertise this via ``needs_hessian = False``
+    # so that the training loop can skip the expensive forward_backward2.
+    needs_hessian = bool(use_second_order) and bool(
+        getattr(optimizer, "needs_hessian", True)
+    )
+    groupwise_step = bool(getattr(optimizer, "groupwise_step", False))
+    if use_second_order:
+        if groupwise_step:
+            label = "Reduced Newton (groupwise second-order)"
+        else:
+            label = "Newton (second-order)" if needs_hessian else "KFAC (empirical-Fisher, first-order backward)"
+    else:
+        label = "Adam (first-order)"
+    print(f"   Mode: {label}")
 
     # ---- Scheduler ----
     from gsplat2ct.optim.scheduler import OptimizerScheduler
@@ -695,6 +820,7 @@ def train(cfg: DictConfig) -> None:
     video_recorder.set_params(params)
     gaussian_video_recorder.set_params(params)
     strategy_debug_vis_dir = os.path.join(vis_dir, "strategy_debug")
+    reduced_step_vis_cfg = getattr(vis_cfg, "reduced_step_projection", None)
 
     # ---- Training loop ----
     print("[5/5] Starting training...")
@@ -789,21 +915,27 @@ def train(cfg: DictConfig) -> None:
         op_config = make_train_config(cfg, (img_h, img_w), vol_dims)
 
         # Forward + backward
-        if use_second_order:
+        groupwise_initial = None
+        skip_optimizer_update = False
+        if needs_hessian:
             fwd, grad, hess = operator.forward_backward2(params, data_obj, op_config)
-            optimizer.add_grad_hess(grad, hess)
+            if groupwise_step:
+                groupwise_initial = (fwd, grad, hess)
+            else:
+                optimizer.add_grad_hess(grad, hess)
         else:
             fwd, grad = operator.forward_backward1(params, data_obj, op_config)
             optimizer.add_grad(grad)
 
         loss_total, loss_img, loss_tv = _extract_loss_triplet(fwd)
 
-        # For densification stats, second-order path can optionally query
-        # first-order abs-grad aux tensors (v_means2d_abs) without changing
-        # second-order optimization signals.
+        # For densification stats, the true-Hessian second-order path can
+        # optionally query first-order abs-grad aux tensors without changing
+        # the second-order optimization signals. Not needed when the
+        # backward was already first-order (Adam or KFAC).
         strategy_grad_aux = grad
         if (
-            use_second_order
+            needs_hessian
             and strategy.should_accumulate_grad_stats(step)
             and bool(getattr(strategy, "absgrad", False))
         ):
@@ -868,6 +1000,7 @@ def train(cfg: DictConfig) -> None:
                 step=step,
             )
             if changed:
+                skip_optimizer_update = True
                 # Clear only DefaultStrategy grad2d/count history and keep
                 # optimizer history through topology transition.
                 strategy.reset_grad_accumulator()
@@ -968,6 +1101,7 @@ def train(cfg: DictConfig) -> None:
                 step=step,
             )
             if changed_comp:
+                skip_optimizer_update = True
                 strategy.reset_grad_accumulator()
                 applied_topology_transition = False
                 if hasattr(optimizer, "apply_topology_transition"):
@@ -1087,7 +1221,39 @@ def train(cfg: DictConfig) -> None:
         # step per training iteration, even if topology changed this round.
         # When topology changed, optimizer buffers were cleared above, so this
         # step is intentionally a no-op update but still advances step_count.
-        optimizer.step()
+        if groupwise_step:
+            if skip_optimizer_update:
+                optimizer.step()
+            else:
+                capture_reduced_step_vis = (
+                    reduced_step_vis_cfg is not None
+                    and bool(getattr(reduced_step_vis_cfg, "enabled", False))
+                    and int(getattr(reduced_step_vis_cfg, "interval", 1)) > 0
+                    and step % int(getattr(reduced_step_vis_cfg, "interval", 1)) == 0
+                )
+                optimizer.step_groupwise(
+                    operator,
+                    data_obj,
+                    op_config,
+                    initial=groupwise_initial,
+                    capture_stages=capture_reduced_step_vis,
+                )
+                if capture_reduced_step_vis and hasattr(optimizer, "pop_stage_snapshots"):
+                    snapshots = optimizer.pop_stage_snapshots()
+                    if snapshots:
+                        _save_reduced_step_projection_visualization(
+                            snapshots=snapshots,
+                            cfg=cfg,
+                            raw_batch=raw_batch,
+                            data_obj=data_obj,
+                            vol_gt=vol_gt,
+                            bbox=bbox,
+                            device=device,
+                            vis_dir=vis_dir,
+                            step=step,
+                        )
+        else:
+            optimizer.step()
         optimizer.zero_grad()
 
         # Logging
@@ -1388,6 +1554,495 @@ def _render_eval_volume(
         pred_vol = pred_vol.permute(2, 1, 0).contiguous()
     pred_vol = pred_vol.clamp(0.0, 1.0)
     return pred_vol.detach().cpu()
+
+
+class _TensorParamWrapper:
+    def __init__(self, data: torch.Tensor):
+        self.data = data
+
+
+def _scale_intrinsics(K: torch.Tensor, sx: float, sy: float) -> torch.Tensor:
+    K_scaled = K.clone()
+    K_scaled[:, 0, 0] *= float(sx)
+    K_scaled[:, 0, 2] *= float(sx)
+    K_scaled[:, 1, 1] *= float(sy)
+    K_scaled[:, 1, 2] *= float(sy)
+    return K_scaled.contiguous()
+
+
+def _rotate_camtoworld_around_z(c2w: torch.Tensor, angle_rad: float) -> torch.Tensor:
+    ca = math.cos(float(angle_rad))
+    sa = math.sin(float(angle_rad))
+    Rz = torch.tensor(
+        [[ca, -sa, 0.0], [sa, ca, 0.0], [0.0, 0.0, 1.0]],
+        device=c2w.device,
+        dtype=c2w.dtype,
+    )
+    out = c2w.clone()
+    out[:, :3, :3] = torch.einsum("ij,bjk->bik", Rz, c2w[:, :3, :3])
+    out[:, :3, 3] = torch.einsum("ij,bj->bi", Rz, c2w[:, :3, 3])
+    return out.contiguous()
+
+
+@torch.no_grad()
+def _resize_projection_for_vis(
+    image: torch.Tensor,
+    img_h: int,
+    img_w: int,
+) -> torch.Tensor:
+    import torch.nn.functional as F
+
+    x = image.detach().float()
+    if x.ndim == 3 and x.shape[-1] == 1:
+        x = x.squeeze(-1)
+    if x.ndim == 3 and x.shape[0] == 1:
+        x = x.squeeze(0)
+    x4 = x.unsqueeze(0).unsqueeze(0)
+    y = F.interpolate(x4, size=(int(img_h), int(img_w)), mode="bilinear", align_corners=False)
+    return y[0, 0].detach().cpu()
+
+
+@torch.no_grad()
+def _render_projection_from_snapshot(
+    *,
+    snapshot: Dict[str, torch.Tensor],
+    viewmats: torch.Tensor,
+    Ks: torch.Tensor,
+    img_h: int,
+    img_w: int,
+    device: torch.device,
+    scale_min: float,
+    scale_max: float,
+    eps_blur: float,
+    tile_size: int,
+) -> torch.Tensor:
+    C = int(viewmats.shape[0])
+    opacity_raw = snapshot["opacity"].to(device=device).contiguous()
+    if opacity_raw.ndim == 1:
+        opacity = opacity_raw.unsqueeze(0).expand(C, -1).contiguous()
+    else:
+        opacity = opacity_raw[:C].contiguous()
+
+    rast_params = Params()
+    rast_params.add_param(
+        "means",
+        _TensorParamWrapper(snapshot["means"].to(device=device).contiguous()),
+    )
+    rast_params.add_param(
+        "quats",
+        _TensorParamWrapper(snapshot["quats"].to(device=device).contiguous()),
+    )
+    rast_params.add_param(
+        "scale_ori",
+        _TensorParamWrapper(snapshot["scale_ori"].to(device=device).contiguous()),
+    )
+    rast_params.add_param("opacity", _TensorParamWrapper(opacity))
+
+    data_obj = Data()
+    data_obj.set(viewmats=viewmats.contiguous(), Ks=Ks.contiguous())
+
+    op_cfg = Config()
+    op_cfg.set(
+        img_dim1=int(img_w),
+        img_dim0=int(img_h),
+        tile_size=int(tile_size),
+        eps_blur=float(eps_blur),
+        scale_min=float(scale_min),
+        scale_max=float(scale_max),
+    )
+
+    op = GS3DCTRasterizeCUDA()
+    op.initialize(rast_params)
+    pred = op.forward_only(rast_params, data_obj, op_cfg).outputs["render_output"]
+    return pred[0].detach().clamp(0.0, 1.0).cpu()
+
+
+@torch.no_grad()
+def _project_volume_gt_for_view(
+    *,
+    vol_gt: torch.Tensor,
+    bbox: torch.Tensor,
+    viewmats: torch.Tensor,
+    Ks: torch.Tensor,
+    img_h: int,
+    img_w: int,
+    ray_samples: int,
+) -> torch.Tensor:
+    """Ray-march the GT volume for qualitative projection debugging."""
+    import torch.nn.functional as F
+
+    device = viewmats.device
+    dtype = viewmats.dtype
+    vol = vol_gt.to(device=device, dtype=dtype)
+    bbox_dev = bbox.to(device=device, dtype=dtype)
+    bmin, bmax = bbox_dev[0], bbox_dev[1]
+
+    c2w = torch.linalg.inv(viewmats[:1])[0]
+    K = Ks[0].to(device=device, dtype=dtype)
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    yy, xx = torch.meshgrid(
+        torch.arange(int(img_h), device=device, dtype=dtype),
+        torch.arange(int(img_w), device=device, dtype=dtype),
+        indexing="ij",
+    )
+    dirs_cam = torch.stack(
+        [
+            (xx + 0.5 - cx) / fx.clamp_min(1e-12),
+            (yy + 0.5 - cy) / fy.clamp_min(1e-12),
+            torch.ones_like(xx),
+        ],
+        dim=-1,
+    )
+    dirs_world = torch.einsum("ij,hwj->hwi", c2w[:3, :3], dirs_cam)
+    dirs_world = dirs_world / dirs_world.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    origin = c2w[:3, 3]
+
+    eps = torch.as_tensor(1e-12, device=device, dtype=dtype)
+    parallel = dirs_world.abs() < eps
+    safe_dirs = torch.where(
+        parallel,
+        torch.where(dirs_world >= 0.0, eps, -eps),
+        dirs_world,
+    )
+    inv_dirs = 1.0 / safe_dirs
+    t0 = (bmin.view(1, 1, 3) - origin.view(1, 1, 3)) * inv_dirs
+    t1 = (bmax.view(1, 1, 3) - origin.view(1, 1, 3)) * inv_dirs
+    t_axis_min = torch.minimum(t0, t1)
+    t_axis_max = torch.maximum(t0, t1)
+
+    outside_parallel = parallel & (
+        (origin.view(1, 1, 3) < bmin.view(1, 1, 3))
+        | (origin.view(1, 1, 3) > bmax.view(1, 1, 3))
+    )
+    valid = ~outside_parallel.any(dim=-1)
+    t_near = t_axis_min.max(dim=-1).values
+    t_far = t_axis_max.min(dim=-1).values
+    t_start = torch.clamp(t_near, min=0.0)
+    valid = valid & (t_far > t_start)
+    length = (t_far - t_start).clamp_min(0.0)
+
+    n_samples = max(int(ray_samples), 2)
+    alpha = torch.linspace(0.0, 1.0, n_samples, device=device, dtype=dtype)
+    t = t_start.unsqueeze(0) + alpha.view(n_samples, 1, 1) * length.unsqueeze(0)
+    points = origin.view(1, 1, 1, 3) + t.unsqueeze(-1) * dirs_world.unsqueeze(0)
+    grid = 2.0 * (points - bmin.view(1, 1, 1, 3)) / (bmax - bmin).view(1, 1, 1, 3) - 1.0
+
+    # vol_gt is stored as (W, D, H) for x/y/z. grid_sample expects
+    # input shape (N, C, D, H, W) and grid coordinates ordered as x/y/z.
+    volume = vol.permute(2, 1, 0).contiguous().unsqueeze(0).unsqueeze(0)
+    samples = F.grid_sample(
+        volume,
+        grid.unsqueeze(0),
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    )[0, 0]
+    proj = samples.mean(dim=0) * length
+    proj = torch.where(valid, proj, torch.zeros_like(proj))
+    return proj.detach().cpu()
+
+
+def _finite_concat_for_vis(
+    tensors: List[torch.Tensor],
+    *,
+    abs_value: bool = False,
+) -> torch.Tensor:
+    chunks: List[torch.Tensor] = []
+    for tensor in tensors:
+        x = tensor.detach().float().reshape(-1).cpu()
+        x = x[torch.isfinite(x)]
+        if x.numel() == 0:
+            continue
+        chunks.append(x.abs() if abs_value else x)
+    if not chunks:
+        return torch.empty(0, dtype=torch.float32)
+    return torch.cat(chunks)
+
+
+def _robust_percentile_for_vis(
+    tensors: List[torch.Tensor],
+    *,
+    percentile: float,
+    fallback: float,
+    abs_value: bool = False,
+) -> float:
+    vals = _finite_concat_for_vis(tensors, abs_value=abs_value)
+    if vals.numel() == 0:
+        return float(fallback)
+    q = min(max(float(percentile) / 100.0, 0.0), 1.0)
+    value = float(torch.quantile(vals, q).item())
+    return max(value, float(fallback), 1e-12)
+
+
+def _stage_slug(title: str) -> str:
+    return title.lower().replace(" ", "_")
+
+
+def _save_single_reduced_stage_figure(
+    *,
+    out_dir: str,
+    step: int,
+    title: str,
+    current_before: torch.Tensor,
+    current_after: torch.Tensor,
+    current_gt: torch.Tensor,
+    perp_before: torch.Tensor,
+    perp_after: torch.Tensor,
+    perp_gt: torch.Tensor,
+    vmin: float,
+    value_vmax: float,
+    diff_limit: float,
+    improvement_limit: float,
+    gamma: float,
+    value_cmap: str,
+    diff_cmap: str,
+    improvement_cmap: str,
+) -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import PowerNorm, TwoSlopeNorm
+
+    current_diff = current_after - current_before
+    perp_diff = perp_after - perp_before
+    current_improvement = (current_before - current_gt).abs() - (current_after - current_gt).abs()
+    perp_improvement = (perp_before - perp_gt).abs() - (perp_after - perp_gt).abs()
+
+    value_norm = PowerNorm(
+        gamma=max(float(gamma), 1e-6),
+        vmin=float(vmin),
+        vmax=max(float(value_vmax), float(vmin) + 1e-12),
+    )
+    diff_norm = TwoSlopeNorm(vcenter=0.0, vmin=-float(diff_limit), vmax=float(diff_limit))
+    improvement_norm = TwoSlopeNorm(
+        vcenter=0.0,
+        vmin=-float(improvement_limit),
+        vmax=float(improvement_limit),
+    )
+
+    rows = [
+        (
+            "Current view",
+            [current_before, current_after, current_gt, current_diff, current_improvement],
+        ),
+        (
+            "Perpendicular view",
+            [perp_before, perp_after, perp_gt, perp_diff, perp_improvement],
+        ),
+    ]
+    col_titles = ["before", "after", "GT", "after - before", "|before-GT|-|after-GT|"]
+
+    fig, axes = plt.subplots(2, 5, figsize=(18, 7))
+    fig.subplots_adjust(left=0.075, right=0.98, top=0.86, bottom=0.18, wspace=0.04, hspace=0.10)
+    value_im = diff_im = improvement_im = None
+
+    for row_idx, (_row_label, images) in enumerate(rows):
+        for col_idx, image in enumerate(images):
+            ax = axes[row_idx, col_idx]
+            if col_idx < 3:
+                value_im = ax.imshow(image.numpy(), cmap=value_cmap, norm=value_norm)
+            elif col_idx == 3:
+                diff_im = ax.imshow(image.numpy(), cmap=diff_cmap, norm=diff_norm)
+            else:
+                improvement_im = ax.imshow(image.numpy(), cmap=improvement_cmap, norm=improvement_norm)
+            if row_idx == 0:
+                ax.set_title(col_titles[col_idx])
+            ax.axis("off")
+
+    fig.text(0.025, 0.62, "Current view", rotation=90, va="center", ha="center", fontsize=12)
+    fig.text(0.025, 0.33, "Perpendicular view", rotation=90, va="center", ha="center", fontsize=12)
+
+    if value_im is not None:
+        cax = fig.add_axes([0.12, 0.085, 0.28, 0.025])
+        cbar = fig.colorbar(value_im, cax=cax, orientation="horizontal")
+        cbar.set_label("projection value")
+    if diff_im is not None:
+        cax = fig.add_axes([0.47, 0.085, 0.20, 0.025])
+        cbar = fig.colorbar(diff_im, cax=cax, orientation="horizontal")
+        cbar.set_label("after - before")
+    if improvement_im is not None:
+        cax = fig.add_axes([0.73, 0.085, 0.20, 0.025])
+        cbar = fig.colorbar(improvement_im, cax=cax, orientation="horizontal")
+        cbar.set_label("positive = closer to GT")
+
+    fig.suptitle(
+        f"Reduced Newton {title} update - step {step} "
+        f"(value p-range <= {value_vmax:.3g}, diff +/-{diff_limit:.3g}, improvement +/-{improvement_limit:.3g})",
+        y=0.97,
+    )
+    fig.savefig(os.path.join(out_dir, f"step_{step:06d}_{_stage_slug(title)}.png"), dpi=150)
+    plt.close(fig)
+
+
+@torch.no_grad()
+def _save_reduced_step_projection_visualization(
+    *,
+    snapshots: List[Tuple[str, Dict[str, torch.Tensor]]],
+    cfg: DictConfig,
+    raw_batch: Dict[str, torch.Tensor],
+    data_obj: Data,
+    vol_gt: Optional[torch.Tensor],
+    bbox: Optional[torch.Tensor],
+    device: torch.device,
+    vis_dir: str,
+    step: int,
+) -> None:
+    reduced_cfg = getattr(getattr(cfg, "vis", None), "reduced_step_projection", None)
+    if reduced_cfg is None:
+        return
+
+    label_to_snapshot = {label: snap for label, snap in snapshots}
+    stage_pairs = [
+        ("before", "after_means", "Means"),
+        ("after_means", "after_scales", "Scales"),
+        ("after_scales", "after_quats", "Quats"),
+        ("after_quats", "after_opacity", "Opacity"),
+    ]
+    if any(
+        before_label not in label_to_snapshot or after_label not in label_to_snapshot
+        for before_label, after_label, _title in stage_pairs
+    ):
+        return
+
+    img_tensor = raw_batch["image"]
+    src_h, src_w = int(img_tensor.shape[1]), int(img_tensor.shape[2])
+    max_image_size = max(int(getattr(reduced_cfg, "max_image_size", 256)), 1)
+    scale = min(1.0, float(max_image_size) / float(max(src_h, src_w)))
+    img_h = max(int(round(src_h * scale)), 1)
+    img_w = max(int(round(src_w * scale)), 1)
+    sy = float(img_h) / float(src_h)
+    sx = float(img_w) / float(src_w)
+
+    view_current = data_obj.get("viewmats")[:1].to(device=device).contiguous()
+    K_current = _scale_intrinsics(data_obj.get("Ks")[:1].to(device=device), sx, sy)
+
+    angle_offset = math.radians(float(getattr(reduced_cfg, "perpendicular_angle_offset_deg", 90.0)))
+    c2w_current = raw_batch["camtoworld"][:1].to(device=device).contiguous()
+    c2w_perp = _rotate_camtoworld_around_z(c2w_current, angle_offset)
+    view_perp = torch.linalg.inv(c2w_perp).contiguous()
+    K_perp = K_current.clone()
+
+    tile_size = int(getattr(cfg.trainer, "img_tile_size", 16))
+    current_preds: Dict[str, torch.Tensor] = {}
+    perp_preds: Dict[str, torch.Tensor] = {}
+    for label, snap in label_to_snapshot.items():
+        current_preds[label] = (
+            _render_projection_from_snapshot(
+                snapshot=snap,
+                viewmats=view_current,
+                Ks=K_current,
+                img_h=img_h,
+                img_w=img_w,
+                device=device,
+                scale_min=cfg.model.scale_min,
+                scale_max=cfg.model.scale_max,
+                eps_blur=cfg.trainer.eps_blur,
+                tile_size=tile_size,
+            )
+        )
+        perp_preds[label] = (
+            _render_projection_from_snapshot(
+                snapshot=snap,
+                viewmats=view_perp,
+                Ks=K_perp,
+                img_h=img_h,
+                img_w=img_w,
+                device=device,
+                scale_min=cfg.model.scale_min,
+                scale_max=cfg.model.scale_max,
+                eps_blur=cfg.trainer.eps_blur,
+                tile_size=tile_size,
+            )
+        )
+
+    use_volume_gt = bool(getattr(reduced_cfg, "use_volume_gt", True))
+    if use_volume_gt and vol_gt is not None and bbox is not None:
+        ray_samples = int(getattr(reduced_cfg, "ray_samples", 128))
+        gt_current = _project_volume_gt_for_view(
+            vol_gt=vol_gt,
+            bbox=bbox,
+            viewmats=view_current,
+            Ks=K_current,
+            img_h=img_h,
+            img_w=img_w,
+            ray_samples=ray_samples,
+        )
+        gt_perp = _project_volume_gt_for_view(
+            vol_gt=vol_gt,
+            bbox=bbox,
+            viewmats=view_perp,
+            Ks=K_perp,
+            img_h=img_h,
+            img_w=img_w,
+            ray_samples=ray_samples,
+        )
+    else:
+        gt_current = _resize_projection_for_vis(img_tensor[0], img_h, img_w)
+        gt_perp = torch.zeros_like(gt_current)
+
+    frame_subdir = str(getattr(reduced_cfg, "frame_subdir", "reduced_step_projection"))
+    out_dir = os.path.join(vis_dir, frame_subdir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    vmin = float(getattr(reduced_cfg, "value_min", 0.0))
+    value_vmax = float(getattr(reduced_cfg, "value_max", 1.0))
+    value_percentile = float(getattr(reduced_cfg, "value_percentile", 99.5))
+    diff_percentile = float(getattr(reduced_cfg, "diff_percentile", 99.0))
+    improvement_percentile = float(getattr(reduced_cfg, "improvement_percentile", 99.0))
+    gamma = float(getattr(reduced_cfg, "gamma", 0.6))
+    value_cmap = str(getattr(reduced_cfg, "value_cmap", "magma"))
+    diff_cmap = str(getattr(reduced_cfg, "diff_cmap", "coolwarm"))
+    improvement_cmap = str(getattr(reduced_cfg, "improvement_cmap", "RdYlGn"))
+
+    all_value_tensors: List[torch.Tensor] = list(current_preds.values()) + list(perp_preds.values())
+    all_value_tensors.extend([gt_current, gt_perp])
+    if bool(getattr(reduced_cfg, "auto_value_range", True)):
+        value_vmax = _robust_percentile_for_vis(
+            all_value_tensors,
+            percentile=value_percentile,
+            fallback=max(value_vmax, vmin + 1e-12),
+        )
+
+    for before_label, after_label, title in stage_pairs:
+        current_before = current_preds[before_label]
+        current_after = current_preds[after_label]
+        perp_before = perp_preds[before_label]
+        perp_after = perp_preds[after_label]
+        current_diff = current_after - current_before
+        perp_diff = perp_after - perp_before
+        current_improvement = (current_before - gt_current).abs() - (current_after - gt_current).abs()
+        perp_improvement = (perp_before - gt_perp).abs() - (perp_after - gt_perp).abs()
+        diff_limit = _robust_percentile_for_vis(
+            [current_diff, perp_diff],
+            percentile=diff_percentile,
+            fallback=1e-6,
+            abs_value=True,
+        )
+        improvement_limit = _robust_percentile_for_vis(
+            [current_improvement, perp_improvement],
+            percentile=improvement_percentile,
+            fallback=1e-6,
+            abs_value=True,
+        )
+        _save_single_reduced_stage_figure(
+            out_dir=out_dir,
+            step=step,
+            title=title,
+            current_before=current_before,
+            current_after=current_after,
+            current_gt=gt_current,
+            perp_before=perp_before,
+            perp_after=perp_after,
+            perp_gt=gt_perp,
+            vmin=vmin,
+            value_vmax=value_vmax,
+            diff_limit=diff_limit,
+            improvement_limit=improvement_limit,
+            gamma=gamma,
+            value_cmap=value_cmap,
+            diff_cmap=diff_cmap,
+            improvement_cmap=improvement_cmap,
+        )
 
 
 def _compute_psnr(pred: torch.Tensor, gt: torch.Tensor, eps: float = 1e-12) -> float:

@@ -9,8 +9,8 @@ angle_unit: "auto"
 
 save_steps: []
 
-image_loss_type: "l1"
-lambda_l1: 1.0
+image_loss_type: "l2"
+lambda_l2: 1.0
 lambda_ssim: 0.25
 window_size: 11
 

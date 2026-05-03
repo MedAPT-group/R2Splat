@@ -1,0 +1,38 @@
+# Schedule profile for the K-FAC optimizer.
+#
+# lr:         held stable (the natural-gradient step is already well scaled).
+# damping:    decays 1x -> 0.1x over training so that the Fisher matters more
+#             late in training while early steps stay SGD-safe.
+# ema_decay:  grows from ~0.9 towards ~0.99 by shrinking (1 - ema_decay)
+#             multiplicatively. With base ema_decay=0.95 and min_factor=0.2,
+#             effective ema_decay travels 0.95 -> 0.99 over training.
+# eig_clip:   constant (0 by default). If enabled, can be decayed similarly.
+# max_update: gently decays 1x -> 0.1x to let early steps be aggressive and
+#             late steps be precise (matches the damping schedule semantics).
+
+enabled: true
+
+lr:
+  type: "exp"
+  warmup_steps: 0
+  min_factor: 1.0 # keep lr stable by default; set < 1 to decay
+
+damping:
+  type: "exp"
+  warmup_steps: 0
+  min_factor: 0.1
+
+ema_decay:
+  type: "exp"
+  warmup_steps: 0
+  min_factor: 0.2
+
+eig_clip:
+  type: "constant"
+  warmup_steps: 0
+  min_factor: 1.0
+
+max_update:
+  type: "exp"
+  warmup_steps: 0
+  min_factor: 0.1

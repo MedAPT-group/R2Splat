@@ -29,10 +29,10 @@ optim:
   verbose: true
 
   # Keep the same per-parameter update scales as playground_newton_train.
-  lr_means: 0.0002
-  lr_quats: 0.001
-  lr_scale_ori: 0.005
-  lr_opacity: 0.0005
+  lr_means: 0.002
+  lr_quats: 0.01
+  lr_scale_ori: 0.05
+  lr_opacity: 0.005
 
   allow_negative_opacity: false
 
@@ -41,4 +41,4 @@ schedule:
   lr:
     type: "exp"
     warmup_steps: 0
-    min_factor: 1.0
+    min_factor: 0.1

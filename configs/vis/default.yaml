@@ -42,3 +42,25 @@ gaussian_state_video:
   opacity_activation: "raw"
   opacity_vmin: null
   opacity_vmax: null
+
+# Reduced Newton per-parameter-group projection debug visualization.
+# When enabled, each parameter-group update is saved as a 2x5 figure:
+# before / after / GT / after-before / error improvement.
+reduced_step_projection:
+  enabled: false
+  interval: 1
+  frame_subdir: "reduced_step_projection"
+  perpendicular_angle_offset_deg: 90.0
+  max_image_size: 256
+  ray_samples: 128
+  use_volume_gt: true
+  auto_value_range: true
+  value_min: 0.0
+  value_max: 1.0
+  value_percentile: 99.5
+  diff_percentile: 99.0
+  improvement_percentile: 99.0
+  gamma: 0.6
+  value_cmap: "magma"
+  diff_cmap: "coolwarm"
+  improvement_cmap: "RdYlGn"

@@ -791,7 +791,13 @@ class GS3DCTLossCUDA(SecondForwardBackwardBase):
                 'render_image': render_img.detach(),
                 'render_volume': render_vol.detach(),
             },
-            intermediates={}
+            intermediates={
+                'covars': covars.detach(),
+                'max_scales': max_scales.detach(),
+                'means2d': means2d.detach(),
+                'cov2d_3x3': cov2d_3x3.detach(),
+                'radii_2d': radii_2d.detach(),
+            }
         )
 
         grad_result = GradResult(
@@ -805,6 +811,10 @@ class GS3DCTLossCUDA(SecondForwardBackwardBase):
                 'v_means2d': v_means2d_r,
                 'v_means2d_abs': None,
                 'radii_2d': radii_2d,
+                'v_covars_total': v_covars_total,
+                'h_covars_total': h_covars_total,
+                'h_means_covars_total': h_means_covars_total,
+                'h_covars_opacity_total': h_covars_opacity_total,
             },
         )
 

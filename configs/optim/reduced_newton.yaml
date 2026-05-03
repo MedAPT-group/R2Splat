@@ -1,0 +1,53 @@
+# Reduced-space groupwise Newton optimizer.
+#
+# Usage:
+#   python -m scripts.train optim=reduced_newton
+# or with a one-stop training profile:
+#   python -m scripts.train --config-name r2gaussian_newton_train optim=reduced_newton
+
+use_second_order: true
+second_order_optimizer: "reduced_newton"
+
+# The reduced optimizer does not use EMA/Adam moments, but these fields keep
+# the config shape compatible with other Newton-family optimizer configs.
+grad_strategy: "RAW"
+hess_strategy: "RAW"
+hess_mode: "DIAGONAL"
+warmup_beta_enabled: false
+
+# Uniform test learning rate for all parameter groups.
+lr_means: 0.1
+lr_quats: 0.1
+lr_scale_ori: 0.1
+lr_opacity: 0.1
+
+# Pure Newton-style solve for this test. Numerical floors are provided by
+# clamp_* below.
+damping_means: 0.0
+damping_quats: 0.0
+damping_scale_ori: 0.0
+damping_opacity: 0.0
+
+# Reduced Hessian eigenvalue floor / scalar curvature floor.
+clamp_means: 1.0e-9
+clamp_quats: 1.0e-9
+clamp_scale_ori: 1.0e-9
+clamp_opacity: 1.0e-9
+
+# Trust-region style update clamps. For quats this bounds the reduced angle.
+max_update_means: 0.010
+max_update_quats: 0.050
+max_update_scale_ori: 0.250
+max_update_opacity: 0.025
+
+# Reduced-scale SVD controls.
+reduced_svd_threshold: 1.0e-10
+reduced_max_scale_rank: 2
+
+# Additional rotation-angle cap in radians.
+max_rotation_angle: 1.0 # pi / 3
+
+allow_negative_opacity: false
+min_opacity: 1.0e-4
+means_bound: 1.0
+verbose: true

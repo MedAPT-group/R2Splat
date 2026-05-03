@@ -20,6 +20,7 @@ trainer:
   max_steps: 5000
   batch_size: 3
   eval_interval: 100
+  lambda_tv: 0.0 # for test
 
 # Start densification earlier: second-order converges faster, so 200 is enough.
 strategy:
@@ -71,10 +72,10 @@ optim:
   # the topology-reanneal multiplier right after split/duplicate/prune.
   # Slightly increase damping on groups that still show hard clipping
   # (especially opacity, and mid-stage means/quats/scale_ori).
-  damping_means: 5.0e-2
-  damping_quats: 1.5e-3
-  damping_scale_ori: 1.5e-4
-  damping_opacity: 5.0e-2
+  damping_means: 1.0e-5
+  damping_quats: 1.0e-5
+  damping_scale_ori: 1.0e-6
+  damping_opacity: 1.0e-4
 
   # Hessian diagonal clamp is now a safety floor only; damping is the main
   # Tikhonov-style regularizer.
@@ -97,8 +98,8 @@ optim:
   # `steps` optimizer steps. This tames Newton steps when EMA moments are
   # being rebuilt and the Hessian is noisiest.
   topology_damping_reanneal_enabled: true
-  topology_damping_reanneal_factor: 100.0
-  topology_damping_reanneal_steps: 50
+  topology_damping_reanneal_factor: 10.0
+  topology_damping_reanneal_steps: 20
   topology_damping_reanneal_schedule: "COSINE"
   topology_damping_reanneal_verbose: true
 
@@ -117,7 +118,7 @@ schedule:
   damping:
     type: "log_cosine"
     warmup_steps: 0
-    min_factor: 3.0e-2
+    min_factor: 1.0e-1
   max_update:
     type: "exp"
     warmup_steps: 0

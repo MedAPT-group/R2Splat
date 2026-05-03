@@ -24,7 +24,7 @@ eps: 1.0e-8 # pytorch adam default
 allow_negative_opacity: false
 
 # Newton hyper-parameters (second-order only)
-second_order_optimizer: "newton_diag_clamp" # options: newton_diag_clamp | newton
+second_order_optimizer: "newton_diag_clamp" # options: newton_diag_clamp | newton | reduced_newton | kfac
 hess_mode: "DIAGONAL"
 grad_strategy: "RAW"
 hess_strategy: "RAW"
@@ -53,3 +53,8 @@ max_update_means: 1.0e9
 max_update_quats: 1.0e9
 max_update_scale_ori: 1.0e9
 max_update_opacity: 1.0e9
+
+# Reduced-space Newton only.
+reduced_svd_threshold: 1.0e-8
+reduced_max_scale_rank: 2
+max_rotation_angle: 5.0e-2

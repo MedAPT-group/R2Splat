@@ -74,6 +74,24 @@ class ScheduleConfig:
     max_update_type: str = "constant"
     max_update_warmup_steps: int = 0
     max_update_min_factor: float = 1.0
+    # EMA decay schedule (K-FAC style optimizers).
+    #
+    # To intuitively grow the EMA decay from, say, 0.9 -> 0.99 as training
+    # progresses, we parameterize the schedule on ``1 - ema_decay`` rather
+    # than on ``ema_decay`` itself, i.e.
+    #
+    #     ema_decay(t) = 1 - (1 - ema_decay_base) * factor(t)
+    #
+    # With ``min_factor < 1``, ``1 - ema`` shrinks over training and ``ema``
+    # grows towards 1, which matches the typical K-FAC warm-up heuristic.
+    # With ``min_factor == 1.0`` the schedule is a no-op.
+    ema_decay_type: str = "constant"
+    ema_decay_warmup_steps: int = 0
+    ema_decay_min_factor: float = 1.0
+    # Eigenvalue-floor schedule (K-FAC style optimizers). Multiplicative.
+    eig_clip_type: str = "constant"
+    eig_clip_warmup_steps: int = 0
+    eig_clip_min_factor: float = 1.0
 
 
 class OptimizerScheduler:
@@ -86,6 +104,12 @@ class OptimizerScheduler:
         self._base_damping: Dict[str, float] = dict(getattr(optimizer.config, "damping_map", {}))
         self._base_max_update: Dict[str, float] = dict(
             getattr(optimizer.config, "max_update_map", {})
+        )
+        self._base_ema_decay: Dict[str, float] = dict(
+            getattr(optimizer.config, "ema_decay_map", {})
+        )
+        self._base_eig_clip: Dict[str, float] = dict(
+            getattr(optimizer.config, "eig_clip_map", {})
         )
 
     @classmethod
@@ -128,6 +152,32 @@ class OptimizerScheduler:
             )
             if hasattr(cfg_obj, "max_update")
             else float(getattr(cfg_obj, "max_update_min_factor", 1.0)),
+            ema_decay_type=str(getattr(getattr(cfg_obj, "ema_decay", {}), "type", "constant"))
+            if hasattr(cfg_obj, "ema_decay")
+            else str(getattr(cfg_obj, "ema_decay_type", "constant")),
+            ema_decay_warmup_steps=int(
+                getattr(getattr(cfg_obj, "ema_decay", {}), "warmup_steps", 0)
+            )
+            if hasattr(cfg_obj, "ema_decay")
+            else int(getattr(cfg_obj, "ema_decay_warmup_steps", 0)),
+            ema_decay_min_factor=float(
+                getattr(getattr(cfg_obj, "ema_decay", {}), "min_factor", 1.0)
+            )
+            if hasattr(cfg_obj, "ema_decay")
+            else float(getattr(cfg_obj, "ema_decay_min_factor", 1.0)),
+            eig_clip_type=str(getattr(getattr(cfg_obj, "eig_clip", {}), "type", "constant"))
+            if hasattr(cfg_obj, "eig_clip")
+            else str(getattr(cfg_obj, "eig_clip_type", "constant")),
+            eig_clip_warmup_steps=int(
+                getattr(getattr(cfg_obj, "eig_clip", {}), "warmup_steps", 0)
+            )
+            if hasattr(cfg_obj, "eig_clip")
+            else int(getattr(cfg_obj, "eig_clip_warmup_steps", 0)),
+            eig_clip_min_factor=float(
+                getattr(getattr(cfg_obj, "eig_clip", {}), "min_factor", 1.0)
+            )
+            if hasattr(cfg_obj, "eig_clip")
+            else float(getattr(cfg_obj, "eig_clip_min_factor", 1.0)),
         )
         return cls(sc, optimizer)
 
@@ -166,4 +216,31 @@ class OptimizerScheduler:
             )
             for name, base in self._base_max_update.items():
                 self.optimizer.config.set_max_update(name, float(base) * float(u_f))
+
+        if self._base_ema_decay and hasattr(self.optimizer.config, "set_ema_decay"):
+            e_f = _factor(
+                schedule_type=self.cfg.ema_decay_type,
+                step=step,
+                max_steps=max_steps,
+                warmup_steps=self.cfg.ema_decay_warmup_steps,
+                min_factor=self.cfg.ema_decay_min_factor,
+            )
+            # Schedule 1 - ema_decay multiplicatively so that ema_decay
+            # grows towards 1 as factor shrinks below 1.
+            for name, base in self._base_ema_decay.items():
+                one_minus_base = max(1.0 - float(base), 0.0)
+                scaled = one_minus_base * float(e_f)
+                scaled = min(max(scaled, 0.0), 1.0)
+                self.optimizer.config.set_ema_decay(name, 1.0 - scaled)
+
+        if self._base_eig_clip and hasattr(self.optimizer.config, "set_eig_clip"):
+            c_f = _factor(
+                schedule_type=self.cfg.eig_clip_type,
+                step=step,
+                max_steps=max_steps,
+                warmup_steps=self.cfg.eig_clip_warmup_steps,
+                min_factor=self.cfg.eig_clip_min_factor,
+            )
+            for name, base in self._base_eig_clip.items():
+                self.optimizer.config.set_eig_clip(name, float(base) * float(c_f))
 

@@ -1,0 +1,115 @@
+# K-FAC / Empirical-Fisher optimizer profile.
+#
+# Rationale:
+#   The empirical Fisher F = EMA(g g^T) is always PSD, so the damped matrix
+#   (F + lambda*I) is always PD and the Newton solve is well-posed (which was
+#   not the case for the true-Hessian diag-clamp path). Because the Fisher
+#   rises on the scale of |g|^2, damping must be on the same scale to dominate
+#   the early, rank-deficient Fisher. As training progresses the Fisher fills
+#   in the dominant curvature directions and the effective step behaves like a
+#   block-diagonal natural-gradient step.
+
+use_second_order: true
+second_order_optimizer: "kfac"
+
+# per_param_group (default, safer): one (d x d) Fisher per parameter group
+#   (means 3x3, quats 4x4, scale_ori 3x3, opacity 1x1). Fisher fills fast
+#   because each block is small.
+# per_gaussian: one 11x11 Fisher per Gaussian that also captures within-
+#   Gaussian cross-parameter curvature (means <-> quats, etc.). Slower to
+#   fill early; use together with stronger damping and a warmup.
+kfac_mode: "per_param_group"
+
+# Per-parameter learning rates.
+#
+# With lr=1 and F -> true Gauss-Newton, the step is a pure natural-gradient
+# step whose magnitude is already parameterization-invariant. We nevertheless
+# keep per-group lrs so we can match the magnitude of the well-tuned r2gaussian
+# first-order step (and thus reuse the same densification schedule).
+lr_means: 0.02
+lr_quats: 0.1
+lr_scale_ori: 0.5
+lr_opacity: 0.05
+
+# Tikhonov damping. In ``damping_mode: absolute`` this is the full
+# per-direction lambda on ``F + lambda*I``. In ``damping_mode: relative`` it
+# is the absolute floor: lambda = damping_rel*trace(F)/d + lambda_abs
+# (per_param_group) or a per-dimension variant (per_gaussian; see code).
+# Scheduled/base damping still applies; topology reanneal multiplies the base
+# ``damping_map`` (not the relative part).
+damping_mode: "absolute"
+damping_means: 1.0
+damping_quats: 1.0
+damping_scale_ori: 1.0
+damping_opacity: 1.0
+# ``damping_rel_*`` (relative mode only): dimensionless scale on mean Fisher
+# eigenvalue trace/d. Ignored when ``damping_mode: absolute``.
+damping_rel_means: 0.1
+damping_rel_quats: 0.1
+damping_rel_scale_ori: 0.1
+damping_rel_opacity: 0.1
+
+# EMA decay (alpha) of the Fisher accumulator: F <- alpha*F + (1-alpha) gg^T.
+# 0.95 gives an effective window of ~20 steps, which is short enough to adapt
+# to topology edits and long enough to stabilize the Fisher estimate.
+ema_decay_means: 0.95
+ema_decay_quats: 0.95
+ema_decay_scale_ori: 0.95
+ema_decay_opacity: 0.95
+
+# Gradient EMA momentum used before Fisher construction and Newton solve:
+#   g_ema <- beta * g_ema + (1-beta) * g_t
+#   use g_ema (bias-corrected when bias_correction=true) as the optimization
+# signal. Default 0.9 to match standard momentum behavior.
+grad_ema_decay_means: 0.9
+grad_ema_decay_quats: 0.9
+grad_ema_decay_scale_ori: 0.9
+grad_ema_decay_opacity: 0.9
+
+# Eigenvalue floor applied to (F + lambda*I) before inversion. 0 disables
+# clipping (damping already guarantees invertibility). Set to a small positive
+# value if you see occasional very large per-Gaussian updates from stale Fisher
+# eigen-directions (e.g. right after a topology edit).
+eig_clip_means: 0.0
+eig_clip_quats: 0.0
+eig_clip_scale_ori: 0.0
+eig_clip_opacity: 0.0
+
+# Hard per-element update caps. Sized to 10x the first-order Adam step so
+# KFAC has headroom when Fisher is informative, but a runaway solve cannot
+# destabilize training. Set to inf to disable.
+max_update_means: 0.002
+max_update_quats: 0.01
+max_update_scale_ori: 0.05
+max_update_opacity: 0.005
+
+# Apply Adam-style bias correction F / (1 - alpha^t) to the Fisher EMA.
+# This keeps the effective magnitude correct during the first few EMA
+# warmup steps.
+bias_correction: true
+
+# During the first ``min_step_for_fisher`` optimizer steps, fall back to a
+# damping-only step (delta = -g / lambda) instead of solving a rank-deficient
+# Fisher. With ``warmup_match_fisher_scale: true`` and ``damping_mode:
+# relative``, warmup uses the same ``lambda_rel * scale + lambda_abs`` law
+# but with ``||g||^2/d`` as the curvature scale (see ``gs3d_ct_kfac``).
+min_step_for_fisher: 20
+warmup_match_fisher_scale: false
+warmup_damping_floor: 0.0
+
+# Compensation strategy can inject negative kernels; align with Adam baseline.
+allow_negative_opacity: false
+
+# Topology-triggered damping reanneal: right after a split/duplicate/prune,
+# multiply base damping by ``factor``, then decay back to 1x over ``steps``
+# steps. 100x/50 is often excessive for K-FAC (new rows already behave like
+# damping-only). Prefer a short 3–5x bump over ~10–15 steps; scale ``factor``
+# up if you still see unstable spikes right after densify.
+topology_damping_reanneal_enabled: true
+topology_damping_reanneal_factor: 4.0
+topology_damping_reanneal_steps: 12
+topology_damping_reanneal_schedule: "COSINE"
+topology_damping_reanneal_verbose: false
+
+# Verbose per-step distribution dump (off by default).
+verbose: true
