@@ -8,7 +8,6 @@ from .data import (
     GradResult,
     ParameterLike,
     Params,
-    get_lambda_l2,
 )
 from .gs3d_ct_rasterize import GS3DCTRasterizeCUDA
 from .gs3d_ct_train import GS3DCTLossCUDA
@@ -22,7 +21,6 @@ __all__ = [
     "Config",
     "ForwardResult",
     "GradResult",
-    "get_lambda_l2",
     "GS3DCTLossCUDA",
     "GS3DCTRasterizeCUDA",
     "GS3DCTVoxelizeCUDA",

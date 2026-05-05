@@ -5,8 +5,8 @@
 source: online
 
 # Coarse reconstruction method for online initialization.
-# Supported: sart, fdk, random
-recon_method: sart
+# Supported: fdk, sart, random
+recon_method: fdk
 
 # Number of sampled Gaussian points.
 n_points: 50000

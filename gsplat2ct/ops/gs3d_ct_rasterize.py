@@ -34,6 +34,7 @@ Date: 2026-03-19
 
 from typing import Optional
 
+from ..model.beta import activated_beta_terms
 from .base import ForwardBackwardBase
 from .data import Config, Data, ForwardResult, Params
 
@@ -48,6 +49,13 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         for name in ['means', 'quats', 'scale_ori', 'opacity']:
             if params.get(name) is None:
                 raise ValueError(f"Missing required parameter: {name}")
+        primitive_type = "gaussian"
+        if config is not None:
+            primitive_type = str(config.get("primitive_type", primitive_type)).lower()
+        if params.get("beta") is not None:
+            primitive_type = "beta"
+        if primitive_type == "beta" and params.get("beta") is None:
+            raise ValueError("primitive_type='beta' requires parameter: beta")
         means = params.get('means').data
         if not means.is_cuda:
             raise ValueError("Parameters must be CUDA tensors")
@@ -64,6 +72,7 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
             world_to_image_projection_fwd,
             conics_mu_fwd,
             isect_tiles, isect_offset_encode,
+            beta_rasterize_to_pixels_fwd,
             rasterize_to_pixels_fwd,
         )
 
@@ -71,6 +80,8 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         quats = params.get('quats').data
         scale_ori = params.get('scale_ori').data
         opacity = params.get('opacity').data
+        beta_param = params.get('beta')
+        beta = beta_param.data if beta_param is not None else None
 
         viewmats = data.get('viewmats')
         Ks = data.get('Ks')
@@ -82,6 +93,8 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         eps_blur = config.get('eps_blur', 0.3)
         scale_min = config.get('scale_min', 0.01)
         scale_max = config.get('scale_max', 2.0)
+        primitive_type = str(config.get('primitive_type', 'beta' if beta is not None else 'gaussian')).lower()
+        beta_gamma_init = config.get('beta_gamma_init', 3.5)
 
         # Stage 0: ParameterTransform
         covars, _max_scales = parameter_transform_fwd(
@@ -95,6 +108,17 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
 
         # Stage 2: ConicsMu
         conics, mus = conics_mu_fwd(cov2d_3x3, eps_blur)
+        if primitive_type == "beta":
+            if beta is None:
+                raise ValueError("primitive_type='beta' requires parameter beta")
+            gamma, projected_beta, path_ratio, _act_grad = activated_beta_terms(
+                beta, gamma_init=beta_gamma_init
+            )
+            mus_render = mus * path_ratio.unsqueeze(0)
+            betas_2d = projected_beta.unsqueeze(0).expand(C, -1).contiguous()
+        else:
+            mus_render = mus
+            betas_2d = None
 
         # Stage 3: Tile intersections
         n_tiles_dim0 = (img_dim0 + tile_size - 1) // tile_size
@@ -108,11 +132,18 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         )
 
         # Stage 4: RasterizeToPixels
-        render_output = rasterize_to_pixels_fwd(
-            means2d, conics, opacity, mus,
-            tile_offsets, flatten_ids,
-            img_dim1, img_dim0, tile_size
-        )
+        if primitive_type == "beta":
+            render_output = beta_rasterize_to_pixels_fwd(
+                means2d, conics, opacity, mus_render, betas_2d,
+                tile_offsets, flatten_ids,
+                img_dim1, img_dim0, tile_size
+            )
+        else:
+            render_output = rasterize_to_pixels_fwd(
+                means2d, conics, opacity, mus_render,
+                tile_offsets, flatten_ids,
+                img_dim1, img_dim0, tile_size
+            )
 
         return ForwardResult(
             outputs={'render_output': render_output},

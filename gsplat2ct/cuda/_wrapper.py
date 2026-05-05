@@ -18,8 +18,6 @@ def _make_cuda_func(name: str) -> Callable:
 
 image_loss_fwd = _make_cuda_func("image_loss_fwd")
 image_loss_bwd = _make_cuda_func("image_loss_bwd")
-image_loss_l2_fwd = _make_cuda_func("image_loss_l2_fwd")
-image_loss_l2_bwd = _make_cuda_func("image_loss_l2_bwd")
 image_loss_l1_fwd = _make_cuda_func("image_loss_l1_fwd")
 image_loss_l1_bwd = _make_cuda_func("image_loss_l1_bwd")
 
@@ -33,8 +31,12 @@ isect_offset_encode_3d = _make_cuda_func("isect_offset_encode_3d")
 
 voxelize_to_voxels_fwd = _make_cuda_func("voxelize_to_voxels_fwd")
 voxelize_to_voxels_bwd = _make_cuda_func("voxelize_to_voxels_bwd")
+beta_voxelize_to_voxels_fwd = _make_cuda_func("beta_voxelize_to_voxels_fwd")
+beta_voxelize_to_voxels_bwd = _make_cuda_func("beta_voxelize_to_voxels_bwd")
 rasterize_to_pixels_fwd = _make_cuda_func("rasterize_to_pixels_fwd")
 rasterize_to_pixels_bwd = _make_cuda_func("rasterize_to_pixels_bwd")
+beta_rasterize_to_pixels_fwd = _make_cuda_func("beta_rasterize_to_pixels_fwd")
+beta_rasterize_to_pixels_bwd = _make_cuda_func("beta_rasterize_to_pixels_bwd")
 
 conics_mu_fwd = _make_cuda_func("conics_mu_fwd")
 conics_mu_bwd = _make_cuda_func("conics_mu_bwd")
@@ -58,8 +60,6 @@ def is_cuda_extension_available() -> bool:
 __all__ = [
     "image_loss_fwd",
     "image_loss_bwd",
-    "image_loss_l2_fwd",
-    "image_loss_l2_bwd",
     "image_loss_l1_fwd",
     "image_loss_l1_bwd",
     "volume_loss_fwd",
@@ -70,8 +70,12 @@ __all__ = [
     "isect_offset_encode_3d",
     "voxelize_to_voxels_fwd",
     "voxelize_to_voxels_bwd",
+    "beta_voxelize_to_voxels_fwd",
+    "beta_voxelize_to_voxels_bwd",
     "rasterize_to_pixels_fwd",
     "rasterize_to_pixels_bwd",
+    "beta_rasterize_to_pixels_fwd",
+    "beta_rasterize_to_pixels_bwd",
     "conics_mu_fwd",
     "conics_mu_bwd",
     "world_to_image_projection_fwd",

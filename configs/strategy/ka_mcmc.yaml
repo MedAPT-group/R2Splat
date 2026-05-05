@@ -1,0 +1,14 @@
+# Kernel-Agnostic MCMC primitive-count control.
+
+enabled: true
+type: ka_mcmc
+absgrad: false
+
+refine_start_iter: 500
+refine_stop_iter: 30000
+refine_every: 200
+
+ka_mcmc_cap_max: 200000
+ka_mcmc_min_density: 0.005
+ka_mcmc_grow_rate: 0.05
+ka_mcmc_noise_scale: 0.25

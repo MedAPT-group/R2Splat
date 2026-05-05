@@ -1,10 +1,11 @@
 /**
  * VolumeLoss Forward CUDA Kernels
  * 
- * Implements forward pass for Smooth Total Variation (TV) loss on 3D volumes.
+ * Implements forward pass for anisotropic Total Variation (TV) loss on 3D volumes.
  * Input: (B, D, H, W) volume tensor
  * 
- * Smooth TV Loss = mean(sqrt(∂x/∂d² + eps) + sqrt(∂x/∂h² + eps) + sqrt(∂x/∂w² + eps))
+ * TV Loss = mean over forward-difference edges of abs(diff),
+ * matching r2_gaussian's edge-count normalization.
  * 
  * Uses forward differences:
  * - ∂x/∂d = x[d+1] - x[d]
@@ -22,20 +23,24 @@
 
 namespace gsplat2ct {
 
+template <typename S>
+__device__ __forceinline__ S abs_func(S x) {
+    return x >= static_cast<S>(0) ? x : -x;
+}
+
 // ============================================================================
 // TV Map Kernel
 // ============================================================================
 
 /**
- * Compute smooth TV value per voxel.
- * Each thread handles one voxel and computes the sum of sqrt(diff^2 + eps).
+ * Compute TV value per voxel.
+ * Each thread handles one voxel and computes the sum of abs(diff).
  */
 template <typename S>
 __global__ void compute_tv_map_kernel(
     const S* __restrict__ volume,
     S* __restrict__ tv_map,
-    int B, int D, int H, int W,
-    S eps
+    int B, int D, int H, int W
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_voxels = B * D * H * W;
@@ -56,21 +61,21 @@ __global__ void compute_tv_map_kernel(
     if (d + 1 < D) {
         int idx_d = b * D * H * W + (d + 1) * H * W + h * W + w;
         S diff = volume[idx_d] - val;
-        tv += sqrt(diff * diff + eps);
+        tv += abs_func(diff);
     }
     
     // Forward difference in height
     if (h + 1 < H) {
         int idx_h = b * D * H * W + d * H * W + (h + 1) * W + w;
         S diff = volume[idx_h] - val;
-        tv += sqrt(diff * diff + eps);
+        tv += abs_func(diff);
     }
     
     // Forward difference in width
     if (w + 1 < W) {
         int idx_w = b * D * H * W + d * H * W + h * W + (w + 1);
         S diff = volume[idx_w] - val;
-        tv += sqrt(diff * diff + eps);
+        tv += abs_func(diff);
     }
     
     tv_map[idx] = tv;
@@ -123,7 +128,6 @@ void launch_volume_loss_fwd(
     S* __restrict__ tv_loss,
     S* __restrict__ tv_map,
     int B, int D, int H, int W,
-    S eps,
     cudaStream_t stream
 ) {
     int total_voxels = B * D * H * W;
@@ -132,7 +136,7 @@ void launch_volume_loss_fwd(
     
     // Kernel 1: Compute TV map
     compute_tv_map_kernel<S><<<blocks, threads, 0, stream>>>(
-        volume, tv_map, B, D, H, W, eps
+        volume, tv_map, B, D, H, W
     );
     
     // Kernel 2: Reduce to get total TV loss
@@ -145,16 +149,16 @@ void launch_volume_loss_fwd(
         tv_map, tv_loss, total_voxels
     );
     
-    // Note: The final division by N should be done in the wrapper
+    // Note: The final division by edge count is done in the wrapper.
 }
 
 // Explicit template instantiations
 template void launch_volume_loss_fwd<float>(
-    const float*, float*, float*, int, int, int, int, float, cudaStream_t
+    const float*, float*, float*, int, int, int, int, cudaStream_t
 );
 
 template void launch_volume_loss_fwd<double>(
-    const double*, double*, double*, int, int, int, int, double, cudaStream_t
+    const double*, double*, double*, int, int, int, int, cudaStream_t
 );
 
 } // namespace gsplat2ct

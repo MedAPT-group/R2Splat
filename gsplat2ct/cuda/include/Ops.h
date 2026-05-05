@@ -10,86 +10,37 @@
 
 namespace gsplat2ct {
 
-using ImageLossResult = std::tuple<
-    torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor,
-    torch::Tensor, torch::Tensor, torch::Tensor>;
+using ImageLossResult = std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>;
 
 ImageLossResult image_loss_fwd(
     const torch::Tensor& prediction,
     const torch::Tensor& target,
-    int window_size,
-    float lambda_l2,
-    float lambda_ssim,
-    bool compute_statistics);
+    float lambda_l1);
 
 torch::Tensor image_loss_bwd(
     const torch::Tensor& prediction,
     const torch::Tensor& target,
-    const torch::Tensor& mu_r,
-    const torch::Tensor& mu_m,
-    const torch::Tensor& f1,
-    const torch::Tensor& f2,
-    const torch::Tensor& f3,
-    const torch::Tensor& f4,
     const torch::Tensor& grad_output,
-    int window_size,
-    float lambda_l2,
-    float lambda_ssim);
-
-ImageLossResult image_loss_l2_fwd(
-    const torch::Tensor& prediction,
-    const torch::Tensor& target,
-    int window_size,
-    float lambda_l2,
-    float lambda_ssim,
-    bool compute_statistics);
-
-torch::Tensor image_loss_l2_bwd(
-    const torch::Tensor& prediction,
-    const torch::Tensor& target,
-    const torch::Tensor& mu_r,
-    const torch::Tensor& mu_m,
-    const torch::Tensor& f1,
-    const torch::Tensor& f2,
-    const torch::Tensor& f3,
-    const torch::Tensor& f4,
-    const torch::Tensor& grad_output,
-    int window_size,
-    float lambda_l2,
-    float lambda_ssim);
+    float lambda_l1);
 
 ImageLossResult image_loss_l1_fwd(
     const torch::Tensor& prediction,
     const torch::Tensor& target,
-    int window_size,
-    float lambda_l1,
-    float lambda_ssim,
-    bool compute_statistics);
+    float lambda_l1);
 
 torch::Tensor image_loss_l1_bwd(
     const torch::Tensor& prediction,
     const torch::Tensor& target,
-    const torch::Tensor& mu_r,
-    const torch::Tensor& mu_m,
-    const torch::Tensor& f1,
-    const torch::Tensor& f2,
-    const torch::Tensor& f3,
-    const torch::Tensor& f4,
     const torch::Tensor& grad_output,
-    int window_size,
-    float lambda_l1,
-    float lambda_ssim);
+    float lambda_l1);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> volume_loss_fwd(
     const torch::Tensor& volume,
-    float eps,
     float lambda_tv);
 
 torch::Tensor volume_loss_bwd(
     const torch::Tensor& volume,
     const torch::Tensor& grad_output,
-    float eps,
     float lambda_tv);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
@@ -145,6 +96,32 @@ voxelize_to_voxels_bwd_tensor(
     const uint32_t dim0,
     const uint32_t tile_size);
 
+torch::Tensor beta_voxelize_to_voxels_fwd_tensor(
+    const torch::Tensor& means3d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+beta_voxelize_to_voxels_bwd_tensor(
+    const torch::Tensor& means3d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_output,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
 std::tuple<torch::Tensor, torch::Tensor>
 conics_mu_fwd_tensor(
     const torch::Tensor& cov2d_3x3,
@@ -175,6 +152,33 @@ rasterize_to_pixels_bwd_tensor(
     const torch::Tensor& conics,
     const torch::Tensor& opacities,
     const torch::Tensor& mus,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_output,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const bool absgrad);
+
+torch::Tensor beta_rasterize_to_pixels_fwd_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+beta_rasterize_to_pixels_bwd_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& betas,
     const torch::Tensor& tile_offsets,
     const torch::Tensor& flatten_ids,
     const torch::Tensor& v_render_output,

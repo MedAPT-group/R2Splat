@@ -4,10 +4,9 @@ defaults:
   - base
   - model: default
   - init: default
-  - compensate: none
   - trainer: default
   - optim: default
-  - schedule: none
+  - schedule: default
   - exp: 25_views
   - strategy: none
   - vis: default

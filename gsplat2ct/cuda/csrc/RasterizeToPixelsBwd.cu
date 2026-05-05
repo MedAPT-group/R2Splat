@@ -42,6 +42,7 @@ IMPORTANT! IMPORTANT! IMPORTANT!
 #include "../include/helpers.cuh"
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
+#include <cmath>
 
 namespace gsplat2ct {
 
@@ -335,6 +336,258 @@ void launch_rasterize_to_pixels_bwd(
 }
 
 // ============================================================================
+// Beta Backward Pass Kernel
+// ============================================================================
+
+template <typename S>
+__global__ void beta_rasterize_to_pixels_bwd_kernel(
+    const uint32_t C,
+    const uint32_t N,
+    const uint32_t n_isects,
+    const vec2<S>* __restrict__ means2d,
+    const vec3<S>* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const S* __restrict__ mus,
+    const S* __restrict__ betas,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const uint32_t n_tiles_dim1,
+    const uint32_t n_tiles_dim0,
+    const int32_t* __restrict__ tile_offsets,
+    const int32_t* __restrict__ flatten_ids,
+    const S* __restrict__ v_render_output,
+    vec2<S>* __restrict__ v_means2d_abs,
+    vec2<S>* __restrict__ v_means2d,
+    vec3<S>* __restrict__ v_conics,
+    S* __restrict__ v_opacities,
+    S* __restrict__ v_mus,
+    S* __restrict__ v_betas
+) {
+    auto block = cg::this_thread_block();
+    int32_t camera_id = block.group_index().x;
+    int32_t tile_id = block.group_index().y * n_tiles_dim1 + block.group_index().z;
+    uint32_t i = block.group_index().y * tile_size + block.thread_index().y;
+    uint32_t j = block.group_index().z * tile_size + block.thread_index().x;
+
+    tile_offsets += camera_id * n_tiles_dim0 * n_tiles_dim1;
+    v_render_output += camera_id * dim0 * dim1;
+
+    const S px = static_cast<S>(j) + static_cast<S>(0.5);
+    const S py = static_cast<S>(i) + static_cast<S>(0.5);
+    const int32_t pix_id = i * dim1 + j;
+    const bool inside = (i < dim0 && j < dim1);
+    const S v_render = inside ? v_render_output[pix_id] : static_cast<S>(0);
+
+    const int32_t range_start = tile_offsets[tile_id];
+    const int32_t range_end =
+        (camera_id == static_cast<int32_t>(C) - 1) &&
+        (tile_id == static_cast<int32_t>(n_tiles_dim1 * n_tiles_dim0) - 1)
+            ? static_cast<int32_t>(n_isects)
+            : tile_offsets[tile_id + 1];
+
+    const uint32_t block_size = block.size();
+    const uint32_t num_batches = (range_end - range_start + block_size - 1) / block_size;
+
+    extern __shared__ int s[];
+    int32_t* id_batch = reinterpret_cast<int32_t*>(s);
+    vec4<S>* xy_opacity_beta_batch = reinterpret_cast<vec4<S>*>(&id_batch[block_size]);
+    vec3<S>* conic_batch = reinterpret_cast<vec3<S>*>(&xy_opacity_beta_batch[block_size]);
+    S* mu_batch = reinterpret_cast<S*>(&conic_batch[block_size]);
+
+    const uint32_t tr = block.thread_rank();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+
+    for (uint32_t b = 0; b < num_batches; ++b) {
+        block.sync();
+
+        const uint32_t batch_start = range_start + block_size * b;
+        const uint32_t idx = batch_start + tr;
+        if (idx < static_cast<uint32_t>(range_end)) {
+            const int32_t g = flatten_ids[idx];
+            id_batch[tr] = g;
+            const vec2<S> xy = means2d[g];
+            xy_opacity_beta_batch[tr] = {xy.x, xy.y, opacities[g], betas[g]};
+            conic_batch[tr] = conics[g];
+            mu_batch[tr] = mus[g];
+        }
+
+        block.sync();
+
+        const uint32_t batch_size = min(block_size, static_cast<uint32_t>(range_end) - batch_start);
+        for (uint32_t t = 0; t < batch_size; ++t) {
+            bool valid = inside;
+            vec2<S> delta = {0, 0};
+            vec3<S> conic = {0, 0, 0};
+            S opac = 0;
+            S mu = 0;
+            S beta = 0;
+            S h = 0;
+            S vis = 0;
+            S alpha = 0;
+
+            if (valid) {
+                conic = conic_batch[t];
+                const vec4<S> xy_opac_beta = xy_opacity_beta_batch[t];
+                opac = xy_opac_beta.z;
+                beta = xy_opac_beta.w;
+                mu = mu_batch[t];
+                delta = {xy_opac_beta.x - px, xy_opac_beta.y - py};
+                const S d2 =
+                    conic.x * delta.x * delta.x +
+                    static_cast<S>(2) * conic.y * delta.x * delta.y +
+                    conic.z * delta.y * delta.y;
+                h = static_cast<S>(1) - d2;
+                if (d2 < static_cast<S>(0) || h <= static_cast<S>(0)) {
+                    valid = false;
+                }
+                vis = valid ? pow(h, beta) : static_cast<S>(0);
+                alpha = opac * mu * vis;
+                if (fabs(alpha) < static_cast<S>(1e-5)) {
+                    valid = false;
+                }
+            }
+
+            if (!warp.any(valid)) {
+                continue;
+            }
+
+            vec2<S> v_xy_local = {0, 0};
+            vec2<S> v_xy_abs_local = {0, 0};
+            vec3<S> v_conic_local = {0, 0, 0};
+            S v_opacity_local = 0;
+            S v_mu_local = 0;
+            S v_beta_local = 0;
+
+            if (valid) {
+                const S v_d2 = -opac * mu * beta * pow(h, beta - static_cast<S>(1)) * v_render;
+                v_conic_local = {
+                    v_d2 * delta.x * delta.x,
+                    static_cast<S>(2) * v_d2 * delta.x * delta.y,
+                    v_d2 * delta.y * delta.y
+                };
+                v_xy_local = {
+                    static_cast<S>(2) * v_d2 * (conic.x * delta.x + conic.y * delta.y),
+                    static_cast<S>(2) * v_d2 * (conic.y * delta.x + conic.z * delta.y)
+                };
+                if (v_means2d_abs != nullptr) {
+                    v_xy_abs_local = {fabs(v_xy_local.x), fabs(v_xy_local.y)};
+                }
+                v_opacity_local = v_render * mu * vis;
+                v_mu_local = v_render * opac * vis;
+                v_beta_local = v_render * alpha * log(h);
+            }
+
+            gsplat::warpSum(v_xy_local, warp);
+            if (v_means2d_abs != nullptr) {
+                gsplat::warpSum(v_xy_abs_local, warp);
+            }
+            gsplat::warpSum(v_conic_local, warp);
+            gsplat::warpSum(v_opacity_local, warp);
+            gsplat::warpSum(v_mu_local, warp);
+            gsplat::warpSum(v_beta_local, warp);
+
+            if (warp.thread_rank() == 0) {
+                const int32_t g = id_batch[t];
+
+                S* v_xy_ptr = reinterpret_cast<S*>(v_means2d) + 2 * g;
+                atomicAdd(v_xy_ptr, v_xy_local.x);
+                atomicAdd(v_xy_ptr + 1, v_xy_local.y);
+
+                if (v_means2d_abs != nullptr) {
+                    S* v_xy_abs_ptr = reinterpret_cast<S*>(v_means2d_abs) + 2 * g;
+                    atomicAdd(v_xy_abs_ptr, v_xy_abs_local.x);
+                    atomicAdd(v_xy_abs_ptr + 1, v_xy_abs_local.y);
+                }
+
+                S* v_conic_ptr = reinterpret_cast<S*>(v_conics) + 3 * g;
+                atomicAdd(v_conic_ptr, v_conic_local.x);
+                atomicAdd(v_conic_ptr + 1, v_conic_local.y);
+                atomicAdd(v_conic_ptr + 2, v_conic_local.z);
+
+                atomicAdd(v_opacities + g, v_opacity_local);
+                atomicAdd(v_mus + g, v_mu_local);
+                atomicAdd(v_betas + g, v_beta_local);
+            }
+        }
+    }
+}
+
+template <typename S>
+void launch_beta_rasterize_to_pixels_bwd(
+    const S* __restrict__ means2d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const S* __restrict__ mus,
+    const S* __restrict__ betas,
+    const int32_t* __restrict__ tile_offsets,
+    const int32_t* __restrict__ flatten_ids,
+    const S* __restrict__ v_render_output,
+    S* __restrict__ v_means2d_abs,
+    S* __restrict__ v_means2d,
+    S* __restrict__ v_conics,
+    S* __restrict__ v_opacities,
+    S* __restrict__ v_mus,
+    S* __restrict__ v_betas,
+    uint32_t C,
+    uint32_t N,
+    uint32_t n_isects,
+    uint32_t dim1,
+    uint32_t dim0,
+    uint32_t tile_size,
+    uint32_t n_tiles_dim1,
+    uint32_t n_tiles_dim0,
+    cudaStream_t stream
+) {
+    dim3 threads = {tile_size, tile_size, 1};
+    dim3 blocks = {C, n_tiles_dim0, n_tiles_dim1};
+    const uint32_t block_size = tile_size * tile_size;
+    const uint32_t shared_mem = block_size * (
+        sizeof(int32_t) +
+        sizeof(vec4<S>) +
+        sizeof(vec3<S>) +
+        sizeof(S)
+    );
+
+    if (cudaFuncSetAttribute(
+            beta_rasterize_to_pixels_bwd_kernel<S>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            shared_mem
+        ) != cudaSuccess) {
+        AT_ERROR(
+            "Failed to set maximum shared memory size (requested ",
+            shared_mem,
+            " bytes), try lowering tile_size."
+        );
+    }
+
+    beta_rasterize_to_pixels_bwd_kernel<S><<<blocks, threads, shared_mem, stream>>>(
+        C,
+        N,
+        n_isects,
+        reinterpret_cast<const vec2<S>*>(means2d),
+        reinterpret_cast<const vec3<S>*>(conics),
+        opacities,
+        mus,
+        betas,
+        dim1,
+        dim0,
+        tile_size,
+        n_tiles_dim1,
+        n_tiles_dim0,
+        tile_offsets,
+        flatten_ids,
+        v_render_output,
+        reinterpret_cast<vec2<S>*>(v_means2d_abs),
+        reinterpret_cast<vec2<S>*>(v_means2d),
+        reinterpret_cast<vec3<S>*>(v_conics),
+        v_opacities,
+        v_mus,
+        v_betas
+    );
+}
+
+// ============================================================================
 // Explicit Template Instantiations
 // ============================================================================
 
@@ -352,6 +605,24 @@ template void launch_rasterize_to_pixels_bwd<double>(
     const int32_t*, const int32_t*,
     const double*,
     double*, double*, double*, double*, double*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
+template void launch_beta_rasterize_to_pixels_bwd<float>(
+    const float*, const float*, const float*, const float*, const float*,
+    const int32_t*, const int32_t*,
+    const float*,
+    float*, float*, float*, float*, float*, float*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
+template void launch_beta_rasterize_to_pixels_bwd<double>(
+    const double*, const double*, const double*, const double*, const double*,
+    const int32_t*, const int32_t*,
+    const double*,
+    double*, double*, double*, double*, double*, double*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     cudaStream_t
 );

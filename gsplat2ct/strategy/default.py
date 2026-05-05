@@ -51,6 +51,7 @@ class StrategyTransition:
     split_keep_parent: Optional[torch.Tensor] = None
     split_children: int = 0
     prune_keep: Optional[torch.Tensor] = None
+    append_new: int = 0
 
 
 class DefaultStrategy:
@@ -233,12 +234,15 @@ class DefaultStrategy:
                 means_new = gp.means[sel]
                 quats_new = gp.quats[sel]
                 scale_ori_new = gp.scale_ori[sel]
+                beta_new = gp.beta[sel] if gp.beta is not None else None
                 opa_new = gp.opacity[sel] * 0.5
                 gp.opacity[sel] = opa_new
                 gp.means = torch.cat([gp.means, means_new], dim=0).contiguous()
                 gp.quats = torch.cat([gp.quats, quats_new], dim=0).contiguous()
                 gp.scale_ori = torch.cat([gp.scale_ori, scale_ori_new], dim=0).contiguous()
                 gp.opacity = torch.cat([gp.opacity, opa_new], dim=0).contiguous()
+                if gp.beta is not None and beta_new is not None:
+                    gp.beta = torch.cat([gp.beta, beta_new], dim=0).contiguous()
                 self._cat_running_stats_duplicate(sel)
                 split_mask = torch.cat(
                     [
@@ -270,6 +274,7 @@ class DefaultStrategy:
 
                 quats_split = gp.quats[sel].repeat(2, 1)
                 opa_split = (gp.opacity[sel] * 0.5).repeat(2)
+                beta_split = gp.beta[sel].repeat(2) if gp.beta is not None else None
 
                 keep_parent = torch.ones(gp.num_gaussians, dtype=torch.bool, device=device)
                 keep_parent[sel] = False
@@ -280,6 +285,8 @@ class DefaultStrategy:
                     [gp.scale_ori[keep_parent], scale_ori_split], dim=0
                 ).contiguous()
                 gp.opacity = torch.cat([gp.opacity[keep_parent], opa_split], dim=0).contiguous()
+                if gp.beta is not None and beta_split is not None:
+                    gp.beta = torch.cat([gp.beta[keep_parent], beta_split], dim=0).contiguous()
                 self._running_stats_split(keep_parent, sel)
                 changed = True
 
@@ -308,6 +315,8 @@ class DefaultStrategy:
             gp.quats = gp.quats[keep].contiguous()
             gp.scale_ori = gp.scale_ori[keep].contiguous()
             gp.opacity = gp.opacity[keep].contiguous()
+            if gp.beta is not None:
+                gp.beta = gp.beta[keep].contiguous()
             self._resize_running_stats(keep)
             changed = True
 

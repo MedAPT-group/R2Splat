@@ -113,42 +113,37 @@ def make_train_config(
     vol_w, vol_d, vol_h = vol_dims
     trainer = cfg.trainer
 
-    if "lambda_l2" in trainer:
-        lambda_l2 = float(trainer.lambda_l2)
-    elif "lambda_l1" in trainer:
-        lambda_l2 = float(trainer.lambda_l1)
-    else:
-        lambda_l2 = 1.0
-
     op_cfg = Config()
     op_cfg.set(
         img_dim1=img_w,
         img_dim0=img_h,
         img_tile_size=trainer.img_tile_size,
         eps_blur=trainer.eps_blur,
-        lambda_l2=lambda_l2,
-        lambda_ssim=trainer.lambda_ssim,
-        window_size=trainer.window_size,
+        lambda_l1=float(getattr(trainer, "lambda_l1", 1.0)),
+        lambda_dssim=float(getattr(trainer, "lambda_dssim", 0.0)),
+        ssim_window=int(getattr(trainer, "ssim_window", 11)),
         vol_dim2=vol_w,
         vol_dim1=vol_d,
         vol_dim0=vol_h,
         vol_tile_size=trainer.vol_tile_size,
         eps3d=trainer.eps3d,
         radius_clip=trainer.radius_clip,
-        vol_loss_eps=trainer.vol_loss_eps,
         lambda_tv=float(trainer.lambda_tv if lambda_tv is None else lambda_tv),
         scale_min=cfg.model.scale_min,
         scale_max=cfg.model.scale_max,
-        image_loss_type=str(getattr(trainer, "image_loss_type", "l2")),
+        primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
+        beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
         absgrad=bool(getattr(getattr(cfg, "strategy", None), "absgrad", False)),
     )
     return op_cfg
 
 
-def _extract_loss_triplet(fwd: ForwardResult) -> Tuple[float, float, float]:
+def _extract_loss_values(fwd: ForwardResult) -> Tuple[float, float, float, float, float]:
     return (
         float(fwd.outputs["loss"].item()),
         float(fwd.outputs["loss_image"].item()),
+        float(fwd.outputs.get("loss_l1", fwd.outputs["loss_image"]).item()),
+        float(fwd.outputs.get("loss_dssim", torch.zeros(())).item()),
         float(fwd.outputs["loss_tv"].item()),
     )
 
@@ -251,6 +246,8 @@ def build_optimizer(cfg: DictConfig, params: Params) -> GS3DCTAdamOptimizer:
         "scale_ori": float(cfg.optim.lr_scale_ori),
         "opacity": float(cfg.optim.lr_opacity),
     }
+    if params.get("beta") is not None:
+        lr_map["beta"] = float(getattr(cfg.optim, "lr_beta", cfg.optim.lr_opacity))
     config = FirstOrderConfig(
         lr_map=lr_map,
         beta1=float(cfg.optim.beta1),
@@ -308,7 +305,6 @@ def train(cfg: DictConfig) -> None:
 
     print("[2/5] Initializing Gaussian parameters...")
     init_source = str(getattr(cfg.init, "source", "online")).lower()
-    coarse_volume_wdh: Optional[torch.Tensor] = None
     if init_source == "online":
         init_result = initialize_from_metadata(
             data_dir=cfg.exp.data_dir,
@@ -322,7 +318,6 @@ def train(cfg: DictConfig) -> None:
             sart_n_iter=int(getattr(cfg.init, "sart_n_iter", 20)),
         )
         if init_result.coarse_volume_wdh is not None:
-            coarse_volume_wdh = torch.from_numpy(init_result.coarse_volume_wdh).float().to(device)
             print(f"   Coarse volume reconstructed: {tuple(init_result.coarse_volume_wdh.shape)}")
         gp = GaussianParams.from_points(
             init_result.sampled_points_n4,
@@ -332,6 +327,8 @@ def train(cfg: DictConfig) -> None:
             init_opa_scale=cfg.model.init_opa_scale,
             init_scale_multiplier=cfg.model.init_scale_multiplier,
             bbox=bbox,
+            primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
+            beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
             device=str(device),
         )
     elif init_source == "file":
@@ -343,27 +340,29 @@ def train(cfg: DictConfig) -> None:
             init_opa_scale=cfg.model.init_opa_scale,
             init_scale_multiplier=cfg.model.init_scale_multiplier,
             bbox=bbox,
+            primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
+            beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
             device=str(device),
         )
     else:
         raise ValueError("init.source must be one of [online, file]")
 
     params = gp.to_params()
-    print(f"   {gp.num_gaussians} Gaussians initialized")
+    primitive_name = "Beta primitives" if gp.primitive_type == "beta" else "Gaussians"
+    print(f"   {gp.num_gaussians} {primitive_name} initialized")
 
     print("[3/5] Creating operator...")
     operator = GS3DCTLossCUDA()
-    operator.initialize(params)
+    operator.initialize(params, make_train_config(cfg, (2, 2), (2, 2, 2), lambda_tv=0.0))
 
     print("[4/5] Creating Adam optimizer...")
     optimizer = build_optimizer(cfg, params)
 
     from gsplat2ct.optim.scheduler import OptimizerScheduler
-    from gsplat2ct.strategy import CompensationStrategy, DefaultStrategy
+    from gsplat2ct.strategy import build_strategy
 
     scheduler = OptimizerScheduler.from_hydra(getattr(cfg, "schedule", None) or {}, optimizer)
-    strategy = DefaultStrategy(getattr(cfg, "strategy", None) or {})
-    compensate_strategy = CompensationStrategy(getattr(cfg, "compensate", None) or {})
+    strategy = build_strategy(getattr(cfg, "strategy", None) or {})
 
     print("[5/5] Starting training...")
     max_steps = int(cfg.trainer.max_steps)
@@ -445,7 +444,7 @@ def train(cfg: DictConfig) -> None:
 
         fwd, grad = operator.forward_backward1(params, data_obj, op_config)
         optimizer.add_grad(grad)
-        loss_total, loss_img, loss_tv = _extract_loss_triplet(fwd)
+        loss_total, loss_img, loss_l1, loss_dssim, loss_tv = _extract_loss_values(fwd)
 
         v_means2d = grad.get_aux("v_means2d")
         v_means2d_abs = grad.get_aux("v_means2d_abs")
@@ -489,33 +488,8 @@ def train(cfg: DictConfig) -> None:
                     split_keep_parent=transition.split_keep_parent,
                     split_children=transition.split_children,
                     prune_keep=transition.prune_keep,
+                    append_new=getattr(transition, "append_new", 0),
                 )
-                params = gp.to_params()
-                operator.initialize(params)
-                optimizer.params = params
-                optimizer.zero_grad()
-
-        if (
-            compensate_strategy.should_resample(step)
-            and coarse_volume_wdh is not None
-            and bbox is not None
-            and volume_shape_wdh is not None
-        ):
-            n_before = int(gp.num_gaussians)
-            changed_comp, _comp_stats = compensate_strategy.apply(
-                gp,
-                coarse_volume_wdh=coarse_volume_wdh,
-                bbox=bbox,
-                volume_shape_wdh=volume_shape_wdh,
-                scale_min=cfg.model.scale_min,
-                scale_max=cfg.model.scale_max,
-                step=step,
-            )
-            if changed_comp:
-                skip_optimizer_update = True
-                strategy.reset_grad_accumulator()
-                n_added = max(int(gp.num_gaussians) - n_before, 0)
-                optimizer.apply_topology_transition(append_new=n_added)
                 params = gp.to_params()
                 operator.initialize(params)
                 optimizer.params = params
@@ -527,6 +501,8 @@ def train(cfg: DictConfig) -> None:
         progress.set_postfix(
             total=f"{loss_total:.4f}",
             img=f"{loss_img:.4f}",
+            l1=f"{loss_l1:.4f}",
+            dssim=f"{loss_dssim:.4f}",
             tv=f"{loss_tv:.4f}",
             N=gp.num_gaussians,
             skip=int(skip_optimizer_update),
@@ -540,6 +516,8 @@ def train(cfg: DictConfig) -> None:
                     {
                         "train/loss_total": loss_total,
                         "train/loss_image": loss_img,
+                        "train/loss_l1": loss_l1,
+                        "train/loss_dssim": loss_dssim,
                         "train/loss_tv": loss_tv,
                         "train/num_gaussians": float(gp.num_gaussians),
                     },
@@ -580,7 +558,9 @@ def _run_eval(
         scale_min=cfg.model.scale_min,
         scale_max=cfg.model.scale_max,
         eps_blur=cfg.trainer.eps_blur,
-        ssim_window=cfg.trainer.window_size,
+        ssim_window=int(getattr(cfg.trainer, "ssim_window", 11)),
+        primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
+        beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
     )
     proj_metrics, vis_pairs = proj_eval.evaluate(evalset, device)
     print(
@@ -608,7 +588,9 @@ def _run_eval(
             scale_min=cfg.model.scale_min,
             scale_max=cfg.model.scale_max,
             eps3d=cfg.trainer.eps3d,
-            ssim_window=cfg.trainer.window_size,
+            ssim_window=int(getattr(cfg.trainer, "ssim_window", 11)),
+            primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
+            beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
         )
         vol_metrics, pred_vol = vol_eval.evaluate(vol_gt, bbox, volume_shape_wdh, device)
         print(

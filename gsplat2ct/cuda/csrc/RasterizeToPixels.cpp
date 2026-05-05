@@ -222,4 +222,174 @@ rasterize_to_pixels_bwd_tensor(
     return std::make_tuple(v_means2d_abs, v_means2d, v_conics, v_opacities, v_mus);
 }
 
+torch::Tensor beta_rasterize_to_pixels_fwd_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size
+) {
+    GSPLAT2CT_DEVICE_GUARD(means2d);
+    GSPLAT2CT_CHECK_INPUT(means2d);
+    GSPLAT2CT_CHECK_INPUT(conics);
+    GSPLAT2CT_CHECK_INPUT(opacities);
+    GSPLAT2CT_CHECK_INPUT(mus);
+    GSPLAT2CT_CHECK_INPUT(betas);
+    GSPLAT2CT_CHECK_INPUT(tile_offsets);
+    GSPLAT2CT_CHECK_INPUT(flatten_ids);
+
+    TORCH_CHECK(means2d.dim() == 3, "means2d must be 3D [C, N, 2]");
+    TORCH_CHECK(conics.dim() == 3, "conics must be 3D [C, N, 3]");
+    TORCH_CHECK(opacities.dim() == 2, "opacities must be 2D [C, N]");
+    TORCH_CHECK(mus.dim() == 2, "mus must be 2D [C, N]");
+    TORCH_CHECK(betas.dim() == 2, "betas must be 2D [C, N]");
+    TORCH_CHECK(tile_offsets.dim() == 3, "tile_offsets must be 3D [C, n_tiles_dim0, n_tiles_dim1]");
+    TORCH_CHECK(flatten_ids.dim() == 1, "flatten_ids must be 1D [n_isects]");
+    TORCH_CHECK(means2d.size(2) == 2, "means2d last dim must be 2");
+    TORCH_CHECK(conics.size(2) == 3, "conics last dim must be 3");
+
+    const uint32_t C = static_cast<uint32_t>(means2d.size(0));
+    const uint32_t N = static_cast<uint32_t>(means2d.size(1));
+    const uint32_t n_isects = static_cast<uint32_t>(flatten_ids.size(0));
+    const uint32_t n_tiles_dim0 = static_cast<uint32_t>(tile_offsets.size(1));
+    const uint32_t n_tiles_dim1 = static_cast<uint32_t>(tile_offsets.size(2));
+
+    TORCH_CHECK(conics.size(0) == C && conics.size(1) == N, "conics shape must match means2d");
+    TORCH_CHECK(opacities.size(0) == C && opacities.size(1) == N, "opacities shape must match [C, N]");
+    TORCH_CHECK(mus.size(0) == C && mus.size(1) == N, "mus shape must match [C, N]");
+    TORCH_CHECK(betas.size(0) == C && betas.size(1) == N, "betas shape must match [C, N]");
+    TORCH_CHECK(tile_offsets.size(0) == C, "tile_offsets C dimension must match");
+
+    auto render_output = torch::empty(
+        {static_cast<int64_t>(C), static_cast<int64_t>(dim0), static_cast<int64_t>(dim1)},
+        means2d.options()
+    );
+    if (C == 0 || N == 0 || n_isects == 0) {
+        render_output.zero_();
+        return render_output;
+    }
+
+    at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+    AT_DISPATCH_FLOATING_TYPES(means2d.scalar_type(), "beta_rasterize_to_pixels_fwd", [&]() {
+        launch_beta_rasterize_to_pixels_fwd<scalar_t>(
+            means2d.data_ptr<scalar_t>(),
+            conics.data_ptr<scalar_t>(),
+            opacities.data_ptr<scalar_t>(),
+            mus.data_ptr<scalar_t>(),
+            betas.data_ptr<scalar_t>(),
+            tile_offsets.data_ptr<int32_t>(),
+            flatten_ids.data_ptr<int32_t>(),
+            render_output.data_ptr<scalar_t>(),
+            C,
+            N,
+            n_isects,
+            dim1,
+            dim0,
+            tile_size,
+            n_tiles_dim1,
+            n_tiles_dim0,
+            stream
+        );
+    });
+    return render_output;
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+beta_rasterize_to_pixels_bwd_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_output,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const bool absgrad
+) {
+    GSPLAT2CT_DEVICE_GUARD(means2d);
+    GSPLAT2CT_CHECK_INPUT(means2d);
+    GSPLAT2CT_CHECK_INPUT(conics);
+    GSPLAT2CT_CHECK_INPUT(opacities);
+    GSPLAT2CT_CHECK_INPUT(mus);
+    GSPLAT2CT_CHECK_INPUT(betas);
+    GSPLAT2CT_CHECK_INPUT(tile_offsets);
+    GSPLAT2CT_CHECK_INPUT(flatten_ids);
+    GSPLAT2CT_CHECK_INPUT(v_render_output);
+
+    TORCH_CHECK(means2d.dim() == 3, "means2d must be 3D [C, N, 2]");
+    TORCH_CHECK(conics.dim() == 3, "conics must be 3D [C, N, 3]");
+    TORCH_CHECK(opacities.dim() == 2, "opacities must be 2D [C, N]");
+    TORCH_CHECK(mus.dim() == 2, "mus must be 2D [C, N]");
+    TORCH_CHECK(betas.dim() == 2, "betas must be 2D [C, N]");
+    TORCH_CHECK(v_render_output.dim() == 3, "v_render_output must be 3D [C, dim0, dim1]");
+
+    const uint32_t C = static_cast<uint32_t>(means2d.size(0));
+    const uint32_t N = static_cast<uint32_t>(means2d.size(1));
+    const uint32_t n_isects = static_cast<uint32_t>(flatten_ids.size(0));
+    const uint32_t n_tiles_dim0 = static_cast<uint32_t>(tile_offsets.size(1));
+    const uint32_t n_tiles_dim1 = static_cast<uint32_t>(tile_offsets.size(2));
+
+    TORCH_CHECK(conics.size(0) == C && conics.size(1) == N && conics.size(2) == 3, "conics shape must match [C, N, 3]");
+    TORCH_CHECK(opacities.size(0) == C && opacities.size(1) == N, "opacities shape must match [C, N]");
+    TORCH_CHECK(mus.size(0) == C && mus.size(1) == N, "mus shape must match [C, N]");
+    TORCH_CHECK(betas.size(0) == C && betas.size(1) == N, "betas shape must match [C, N]");
+    TORCH_CHECK(tile_offsets.size(0) == C, "tile_offsets C dimension must match");
+    TORCH_CHECK(
+        v_render_output.size(0) == C &&
+        v_render_output.size(1) == static_cast<int64_t>(dim0) &&
+        v_render_output.size(2) == static_cast<int64_t>(dim1),
+        "v_render_output shape must be [C, dim0, dim1]"
+    );
+
+    torch::Tensor v_means2d = torch::zeros_like(means2d);
+    torch::Tensor v_means2d_abs = absgrad ? torch::zeros_like(means2d) : torch::Tensor();
+    torch::Tensor v_conics = torch::zeros_like(conics);
+    torch::Tensor v_opacities = torch::zeros_like(opacities);
+    torch::Tensor v_mus = torch::zeros_like(mus);
+    torch::Tensor v_betas = torch::zeros_like(betas);
+
+    if (C == 0 || N == 0 || n_isects == 0) {
+        return std::make_tuple(v_means2d_abs, v_means2d, v_conics, v_opacities, v_mus, v_betas);
+    }
+
+    at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+    AT_DISPATCH_FLOATING_TYPES(means2d.scalar_type(), "beta_rasterize_to_pixels_bwd", [&]() {
+        launch_beta_rasterize_to_pixels_bwd<scalar_t>(
+            means2d.data_ptr<scalar_t>(),
+            conics.data_ptr<scalar_t>(),
+            opacities.data_ptr<scalar_t>(),
+            mus.data_ptr<scalar_t>(),
+            betas.data_ptr<scalar_t>(),
+            tile_offsets.data_ptr<int32_t>(),
+            flatten_ids.data_ptr<int32_t>(),
+            v_render_output.data_ptr<scalar_t>(),
+            absgrad ? v_means2d_abs.data_ptr<scalar_t>() : nullptr,
+            v_means2d.data_ptr<scalar_t>(),
+            v_conics.data_ptr<scalar_t>(),
+            v_opacities.data_ptr<scalar_t>(),
+            v_mus.data_ptr<scalar_t>(),
+            v_betas.data_ptr<scalar_t>(),
+            C,
+            N,
+            n_isects,
+            dim1,
+            dim0,
+            tile_size,
+            n_tiles_dim1,
+            n_tiles_dim0,
+            stream
+        );
+    });
+
+    return std::make_tuple(v_means2d_abs, v_means2d, v_conics, v_opacities, v_mus, v_betas);
+}
+
 } // namespace gsplat2ct

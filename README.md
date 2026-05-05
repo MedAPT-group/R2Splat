@@ -1,37 +1,84 @@
 # r2splat
 
-Fast first-order 3D Gaussian Splatting for CT reconstruction.
+面向 CT 重建的快速一阶 3D splatting 项目。当前版本只保留 Adam 一阶优化路径，并支持两类 primitive：
 
-This release focuses on the Adam training path used for CT reconstruction. The
-old experimental optimizer/demo paths and runtime CUDA rebuild path have been
-removed.
+- `gaussian`：默认 R2Gaussian 风格高斯核。
+- `beta`：compact-support 3D Beta density，形状激活为 `gamma = 3.5 * exp(raw_beta)`；投影路径使用 CT 线积分后的指数 `gamma + 0.5`，体素化路径直接查询 3D density。
 
-## Install
+当前默认配置使用 FDK 粗重建初始化、纯 L1 图像损失，以及指数学习率衰减到初始值的 0.1 倍。
+
+## 安装
+
+本项目不再在运行时检测 CUDA 源码并自动 JIT 重编译。只要修改了 `gsplat2ct/cuda` 下的 C++/CUDA 源码，都需要重新安装。
+
+开发安装：
 
 ```bash
 pip install -e . --no-build-isolation
 ```
 
-After changing CUDA or C++ sources, reinstall with the same command so the
-extension is rebuilt.
-
-## Train
+非开发安装：
 
 ```bash
-python -m scripts.train --config-name r2gaussian_train \
-  exp.data_dir=/path/to/ct/scene \
-  exp.result_dir=output/quick_check
+pip install . --no-build-isolation
 ```
 
-The default R2Gaussian-style trainer uses `lambda_tv=0.0166666667`, matching
-R2Gaussian's `0.05` TV strength after accounting for this project's
-voxel-count-normalized TV implementation.
+## 测试
 
-## Validate
+完整数值测试：
+
+```bash
+pytest -q tests
+```
+
+只测 beta 和 TV：
+
+```bash
+pytest -q tests/test_beta_formulas.py tests/test_beta_low_level_numeric.py tests/test_tv_loss.py
+```
+
+## 训练
+
+默认 Gaussian primitive：
+
+```bash
+python -m scripts.train --config-name default \
+  exp.data_dir=/path/to/ct/scene \
+  exp.result_dir=output/gaussian_quick
+```
+
+Beta primitive：
+
+```bash
+python -m scripts.train --config-name default model=beta \
+  exp.data_dir=/path/to/ct/scene \
+  exp.result_dir=output/beta_quick
+```
+
+选择高斯核数量控制策略：
+
+```bash
+# 不做数量控制
+python -m scripts.train --config-name default strategy=none ...
+
+# 默认 grad2d_based_adc
+python -m scripts.train --config-name default strategy=default ...
+
+# Kernel-Agnostic MCMC
+python -m scripts.train --config-name default strategy=ka_mcmc ...
+```
+
+## 验证
 
 ```bash
 python -m scripts.validate \
   data_dir=/path/to/ct/scene \
-  checkpoint_path=output/quick_check/ckpt_29999.pt \
-  result_dir=output/quick_check/validation
+  checkpoint_path=output/gaussian_quick/ckpts/ckpt_final.pt \
+  result_dir=output/gaussian_quick/validation
 ```
+
+checkpoint 会保存 primitive 类型和 beta 激活参数；验证脚本会自动按 checkpoint 中的设置渲染。
+
+## TV loss
+
+TV loss 现在与 r2_gaussian 对齐：对 x/y/z 三个方向的 forward-difference edges 的绝对值求平均。因此默认 `lambda_tv=0.05` 可直接按 r2_gaussian 的语义理解，不再使用 `0.05 / 3` 的临时权重补偿，也不再使用平滑项。

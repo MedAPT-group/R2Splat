@@ -1,0 +1,4 @@
+# Experiment paths for the simple 4 beta primitive cone dataset.
+
+data_dir: "/home/chengzyi/myterminus/data/3DGS2CT/preprocessed/simple_dataset/cone_ntrain_5_angle_360/simple_betas_cone"
+result_dir: "output/simple_beta"

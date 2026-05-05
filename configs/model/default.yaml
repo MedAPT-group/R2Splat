@@ -8,5 +8,13 @@ global_scale: 1.0
 init_opa_scale: 1.0
 init_scale_multiplier: 1.0
 
+# Primitive family: gaussian or beta.
+primitive_type: gaussian
+
+# Beta primitive shape activation:
+# gamma = beta_gamma_init * exp(raw_beta).
+# raw_beta=0 gives gamma=3.5 and projected exponent gamma+0.5=4.
+beta_gamma_init: 3.5
+
 scale_min: 0.0005 # r2-gaussian like
 scale_max: 0.5 # r2-gaussian like

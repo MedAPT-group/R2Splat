@@ -41,12 +41,16 @@ class ProjectionEvaluator:
         scale_max: float = 1.0,
         eps_blur: float = 0.3,
         ssim_window: int = 11,
+        primitive_type: str = "gaussian",
+        beta_gamma_init: float = 3.5,
     ):
         self.params = params
         self.scale_min = scale_min
         self.scale_max = scale_max
         self.eps_blur = eps_blur
         self.ssim_window = ssim_window
+        self.primitive_type = str(primitive_type).lower()
+        self.beta_gamma_init = float(beta_gamma_init)
         self._op = GS3DCTRasterizeCUDA()
         self._op.initialize(params)
 
@@ -92,6 +96,8 @@ class ProjectionEvaluator:
             rast_params.add_param("quats", self.params.get("quats"))
             rast_params.add_param("scale_ori", self.params.get("scale_ori"))
             rast_params.add_param("opacity", _ParamWrapper(opacity_2d))
+            if self.params.get("beta") is not None:
+                rast_params.add_param("beta", self.params.get("beta"))
 
             data_obj = Data()
             data_obj.set(viewmats=viewmats, Ks=K)
@@ -105,6 +111,8 @@ class ProjectionEvaluator:
                 eps_blur=self.eps_blur,
                 scale_min=self.scale_min,
                 scale_max=self.scale_max,
+                primitive_type=self.primitive_type,
+                beta_gamma_init=self.beta_gamma_init,
             )
 
             fwd = self._op.forward_only(rast_params, data_obj, cfg)
@@ -152,12 +160,16 @@ class VolumeEvaluator:
         scale_max: float = 1.0,
         eps3d: float = 1e-4,
         ssim_window: int = 11,
+        primitive_type: str = "gaussian",
+        beta_gamma_init: float = 3.5,
     ):
         self.params = params
         self.scale_min = scale_min
         self.scale_max = scale_max
         self.eps3d = eps3d
         self.ssim_window = ssim_window
+        self.primitive_type = str(primitive_type).lower()
+        self.beta_gamma_init = float(beta_gamma_init)
         self._op = GS3DCTVoxelizeCUDA()
         self._op.initialize(params)
 
@@ -194,6 +206,8 @@ class VolumeEvaluator:
             radius_clip=3.0,
             scale_min=self.scale_min,
             scale_max=self.scale_max,
+            primitive_type=self.primitive_type,
+            beta_gamma_init=self.beta_gamma_init,
         )
 
         fwd = self._op.forward_only(self.params, data_obj, cfg)

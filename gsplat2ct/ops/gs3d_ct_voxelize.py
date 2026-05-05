@@ -35,6 +35,7 @@ Date: 2026-03-19
 
 from typing import Optional
 
+from ..model.beta import activated_beta_terms
 from .base import ForwardBackwardBase
 from .data import Config, Data, ForwardResult, Params
 
@@ -49,6 +50,13 @@ class GS3DCTVoxelizeCUDA(ForwardBackwardBase):
         for name in ['means', 'quats', 'scale_ori', 'opacity']:
             if params.get(name) is None:
                 raise ValueError(f"Missing required parameter: {name}")
+        primitive_type = "gaussian"
+        if config is not None:
+            primitive_type = str(config.get("primitive_type", primitive_type)).lower()
+        if params.get("beta") is not None:
+            primitive_type = "beta"
+        if primitive_type == "beta" and params.get("beta") is None:
+            raise ValueError("primitive_type='beta' requires parameter: beta")
         means = params.get('means').data
         if not means.is_cuda:
             raise ValueError("Parameters must be CUDA tensors")
@@ -64,6 +72,7 @@ class GS3DCTVoxelizeCUDA(ForwardBackwardBase):
             parameter_transform_fwd,
             world_to_volume_mapping_fwd,
             isect_tiles_3d, isect_offset_encode_3d,
+            beta_voxelize_to_voxels_fwd,
             voxelize_to_voxels_fwd,
         )
 
@@ -71,6 +80,8 @@ class GS3DCTVoxelizeCUDA(ForwardBackwardBase):
         quats = params.get('quats').data
         scale_ori = params.get('scale_ori').data
         opacity = params.get('opacity').data
+        beta_param = params.get('beta')
+        beta = beta_param.data if beta_param is not None else None
 
         ranges = data.get('ranges')
         centers = data.get('centers')
@@ -83,11 +94,19 @@ class GS3DCTVoxelizeCUDA(ForwardBackwardBase):
         radius_clip = config.get('radius_clip', 3.0)
         scale_min = config.get('scale_min', 0.01)
         scale_max = config.get('scale_max', 2.0)
+        primitive_type = str(config.get('primitive_type', 'beta' if beta is not None else 'gaussian')).lower()
+        beta_gamma_init = config.get('beta_gamma_init', 3.5)
 
         # Stage 0: ParameterTransform
         covars, max_scales = parameter_transform_fwd(
             quats, scale_ori, scale_min, scale_max
         )
+        if primitive_type == "beta":
+            if beta is None:
+                raise ValueError("primitive_type='beta' requires parameter beta")
+            gamma = activated_beta_terms(beta, gamma_init=beta_gamma_init)[0]
+        else:
+            gamma = None
 
         # Stage 1: WorldToVolumeMapping
         means3d_v, conics, radii = world_to_volume_mapping_fwd(
@@ -109,11 +128,18 @@ class GS3DCTVoxelizeCUDA(ForwardBackwardBase):
         )
 
         # Stage 3: VoxelizeToVoxels
-        render_output = voxelize_to_voxels_fwd(
-            means3d_v, conics, opacity,
-            tile_offsets, flatten_ids,
-            vol_dim2, vol_dim1, vol_dim0, vol_tile_size
-        )
+        if primitive_type == "beta":
+            render_output = beta_voxelize_to_voxels_fwd(
+                means3d_v, conics, opacity, gamma,
+                tile_offsets, flatten_ids,
+                vol_dim2, vol_dim1, vol_dim0, vol_tile_size
+            )
+        else:
+            render_output = voxelize_to_voxels_fwd(
+                means3d_v, conics, opacity,
+                tile_offsets, flatten_ids,
+                vol_dim2, vol_dim1, vol_dim0, vol_tile_size
+            )
 
         return ForwardResult(
             outputs={'render_output': render_output},

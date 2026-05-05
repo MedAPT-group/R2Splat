@@ -30,7 +30,7 @@ class FirstOrderConfig(OptimizerConfig):
 
     beta1: float = 0.9
     beta2: float = 0.999
-    eps: float = 1e-8
+    eps: float = 1e-15
 
 
 class OptimizerBase(ABC):

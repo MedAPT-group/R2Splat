@@ -13,7 +13,6 @@ defaults:
   - schedule: r2gaussian_exp
   - exp: 25_views
   - init: r2gaussian
-  - compensate: none
   - strategy: r2gaussian
   - vis: r2gaussian
   - _self_
@@ -21,4 +20,3 @@ defaults:
 trainer:
   # Disable periodic checkpointing for this profile; train.py still saves ckpt_final.pt at the end.
   save_steps: []
-

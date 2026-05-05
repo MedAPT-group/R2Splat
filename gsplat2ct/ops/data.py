@@ -76,18 +76,6 @@ class Config:
             self.options[name] = val
 
 
-def get_lambda_l2(config: Optional[Config], default: float = 1.0) -> float:
-    if config is None:
-        return default
-    value = config.get("lambda_l2")
-    if value is not None:
-        return float(value)
-    value = config.get("lambda_l1")
-    if value is not None:
-        return float(value)
-    return default
-
-
 @dataclass
 class ForwardResult:
     outputs: Dict[str, Any] = field(default_factory=dict)
@@ -128,5 +116,4 @@ __all__ = [
     "Config",
     "ForwardResult",
     "GradResult",
-    "get_lambda_l2",
 ]

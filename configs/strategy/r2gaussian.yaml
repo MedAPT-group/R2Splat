@@ -1,4 +1,5 @@
 enabled: true
+type: grad2d_based_adc
 
 # Compute/use CUDA absgrad for densification when using first-order training
 # (``forward_backward1``).

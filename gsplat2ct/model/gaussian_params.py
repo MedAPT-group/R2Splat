@@ -52,13 +52,29 @@ class GaussianParams:
         quats: torch.Tensor,
         scale_ori: torch.Tensor,
         opacity: torch.Tensor,
+        beta: Optional[torch.Tensor] = None,
+        primitive_type: str = "gaussian",
+        beta_gamma_init: float = 3.5,
+        beta_gamma_min: Optional[float] = None,
         device: torch.device = torch.device("cuda"),
     ):
         self.device = device
+        self.primitive_type = str(primitive_type).lower()
+        if self.primitive_type not in {"gaussian", "beta"}:
+            raise ValueError("primitive_type must be 'gaussian' or 'beta'")
+        # Legacy checkpoints/configs may still carry beta_gamma_min, but the
+        # current activation is gamma = beta_gamma_init * exp(raw_beta).
+        self.beta_gamma_min = 0.0
+        self.beta_gamma_init = float(beta_gamma_init)
         self.means = means.to(device)
         self.quats = quats.to(device)
         self.scale_ori = scale_ori.to(device)
         self.opacity = opacity.to(device)
+        self.beta = beta.to(device) if beta is not None else None
+        if self.primitive_type == "beta" and self.beta is None:
+            self.beta = torch.zeros(
+                (self.means.shape[0],), dtype=self.means.dtype, device=device
+            )
 
     @property
     def num_gaussians(self) -> int:
@@ -79,6 +95,9 @@ class GaussianParams:
         init_opa_scale: float = 1.0,
         init_scale_multiplier: float = 0.5,
         bbox: Optional[torch.Tensor] = None,
+        primitive_type: str = "gaussian",
+        beta_gamma_init: float = 3.5,
+        beta_gamma_min: Optional[float] = None,
         device: str = "cuda",
     ) -> "GaussianParams":
         """Load ``init_<scene>.npy`` and create parameter tensors.
@@ -122,12 +141,19 @@ class GaussianParams:
         quats[:, 0] = 1.0
 
         opacity = opa_vals.to(dev)
+        beta = None
+        if str(primitive_type).lower() == "beta":
+            beta = torch.zeros((n_points,), dtype=xyz_dev.dtype, device=dev)
 
         gp = cls(
             means=xyz_dev,
             quats=quats,
             scale_ori=scale_ori,
             opacity=opacity,
+            beta=beta,
+            primitive_type=primitive_type,
+            beta_gamma_init=beta_gamma_init,
+            beta_gamma_min=beta_gamma_min,
             device=dev,
         )
 
@@ -146,6 +172,9 @@ class GaussianParams:
         init_opa_scale: float = 1.0,
         init_scale_multiplier: float = 0.5,
         bbox: Optional[torch.Tensor] = None,
+        primitive_type: str = "gaussian",
+        beta_gamma_init: float = 3.5,
+        beta_gamma_min: Optional[float] = None,
         device: str = "cuda",
     ) -> "GaussianParams":
         """Create Gaussian parameters from sampled points ``(N, >=4)``.
@@ -183,12 +212,19 @@ class GaussianParams:
         quats = torch.zeros((n_points, 4), device=dev)
         quats[:, 0] = 1.0
         opacity = opa_vals.to(dev)
+        beta = None
+        if str(primitive_type).lower() == "beta":
+            beta = torch.zeros((n_points,), dtype=xyz_dev.dtype, device=dev)
 
         gp = cls(
             means=xyz_dev,
             quats=quats,
             scale_ori=scale_ori,
             opacity=opacity,
+            beta=beta,
+            primitive_type=primitive_type,
+            beta_gamma_init=beta_gamma_init,
+            beta_gamma_min=beta_gamma_min,
             device=dev,
         )
 
@@ -207,6 +243,8 @@ class GaussianParams:
         params.add_param("quats", _ParamWrapper(self.quats))
         params.add_param("scale_ori", _ParamWrapper(self.scale_ori))
         params.add_param("opacity", _ParamWrapper(self.opacity))
+        if self.primitive_type == "beta" and self.beta is not None:
+            params.add_param("beta", _ParamWrapper(self.beta))
         return params
 
     def update_from_params(self, params: Params) -> None:
@@ -216,6 +254,10 @@ class GaussianParams:
         self.quats = params.get("quats").data
         self.scale_ori = params.get("scale_ori").data
         self.opacity = params.get("opacity").data
+        beta_param = params.get("beta")
+        if beta_param is not None:
+            self.beta = beta_param.data
+            self.primitive_type = "beta"
 
     # ------------------------------------------------------------------
     # Geometry helpers
@@ -231,6 +273,8 @@ class GaussianParams:
             self.quats = self.quats[mask].contiguous()
             self.scale_ori = self.scale_ori[mask].contiguous()
             self.opacity = self.opacity[mask].contiguous()
+            if self.beta is not None:
+                self.beta = self.beta[mask].contiguous()
 
     # ------------------------------------------------------------------
     # Serialization
@@ -246,6 +290,11 @@ class GaussianParams:
                 "quats": self.quats.detach().cpu(),
                 "scale_ori": self.scale_ori.detach().cpu(),
                 "opacity": self.opacity.detach().cpu(),
+                "beta": None if self.beta is None else self.beta.detach().cpu(),
+                "primitive_type": self.primitive_type,
+                "beta_activation": "scaled_exp",
+                "beta_gamma_min": self.beta_gamma_min,
+                "beta_gamma_init": self.beta_gamma_init,
             },
             path,
         )
@@ -259,6 +308,10 @@ class GaussianParams:
             quats=ckpt["quats"],
             scale_ori=ckpt["scale_ori"],
             opacity=ckpt["opacity"],
+            beta=ckpt.get("beta", None),
+            primitive_type=str(ckpt.get("primitive_type", "beta" if ckpt.get("beta", None) is not None else "gaussian")),
+            beta_gamma_init=float(ckpt.get("beta_gamma_init", 3.5)),
+            beta_gamma_min=float(ckpt.get("beta_gamma_min", 0.0)),
             device=torch.device(device),
         )
         return gp, int(ckpt.get("step", -1))

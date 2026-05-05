@@ -13,15 +13,12 @@ angle_unit: "auto"
 
 save_steps: []
 
-# Image loss settings
-# image_loss_type: r2gaussian-like l1
-image_loss_type: "l1"
+# Image loss settings: mean L1 + lambda_dssim * (1 - SSIM), matching R2Gaussian.
 lambda_l1: 1.0
-lambda_ssim: 0.25
-window_size: 11
+lambda_dssim: 0.25
 
-# TV regularization: 0.05 / 3 to match R2Gaussian's edge-mean TV scale.
-lambda_tv: 0.0166666667
+# TV regularization: edge-mean anisotropic TV, directly aligned with R2Gaussian.
+lambda_tv: 0.05
 tv_vol_size: 32
 
 # Operator parameters (keep project defaults)
@@ -30,7 +27,7 @@ img_tile_size: 16
 vol_tile_size: 8
 eps3d: 1.0e-8
 radius_clip: 3.0
-vol_loss_eps: 1.0e-8
 
 # Evaluation
 eval_interval: 1000
+ssim_window: 11

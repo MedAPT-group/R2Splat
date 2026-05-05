@@ -4,11 +4,12 @@ lr_means: 0.0002
 lr_quats: 0.001
 lr_scale_ori: 0.005
 # Raw opacity has no activation, so this is lower than the R2Gaussian density LR.
-lr_opacity: 0.0001
+lr_opacity: 0.0005
+# Raw Beta shape parameter b where gamma = beta_gamma_init * exp(b).
+lr_beta: 0.001
 
 beta1: 0.9
 beta2: 0.999
-eps: 1.0e-8
+eps: 1.0e-15
 
-# Compensation can inject signed kernels; keep false for standard positive density.
 allow_negative_opacity: false

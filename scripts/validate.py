@@ -71,6 +71,8 @@ def _evaluate_projections(
         rast_params.add_param("quats", params.get("quats"))
         rast_params.add_param("scale_ori", params.get("scale_ori"))
         rast_params.add_param("opacity", _PW(opacity_2d))
+        if params.get("beta") is not None:
+            rast_params.add_param("beta", params.get("beta"))
 
         data_obj = Data()
         data_obj.set(viewmats=viewmats, Ks=K)
@@ -81,6 +83,8 @@ def _evaluate_projections(
             img_dim1=img_w, img_dim0=img_h, tile_size=16,
             eps_blur=eps_blur,
             scale_min=cfg.scale_min, scale_max=cfg.scale_max,
+            primitive_type=str(getattr(cfg, "primitive_type", "beta" if params.get("beta") is not None else "gaussian")),
+            beta_gamma_init=float(getattr(cfg, "beta_gamma_init", 3.5)),
         )
 
         with torch.no_grad():
@@ -169,7 +173,10 @@ def main(cfg: DictConfig) -> None:
     print("[2/4] Loading checkpoint...")
     gp, step = GaussianParams.load(cfg.checkpoint_path, device=str(device))
     params = gp.to_params()
-    print(f"   Loaded {gp.num_gaussians} Gaussians from step {step}")
+    cfg.primitive_type = gp.primitive_type
+    cfg.beta_gamma_init = gp.beta_gamma_init
+    primitive_name = "Beta primitives" if gp.primitive_type == "beta" else "Gaussians"
+    print(f"   Loaded {gp.num_gaussians} {primitive_name} from step {step}")
 
     # Projection evaluation
     print("[3/4] Evaluating projections...")
@@ -204,6 +211,8 @@ def main(cfg: DictConfig) -> None:
             scale_max=cfg.scale_max,
             eps3d=float(getattr(cfg, "eps3d", 1e-4)),
             ssim_window=cfg.ssim_window,
+            primitive_type=gp.primitive_type,
+            beta_gamma_init=gp.beta_gamma_init,
         )
         vol_metrics, pred_vol = vol_eval.evaluate(
             vol_gt, bbox, tuple(vol_gt.shape), device
