@@ -37,7 +37,6 @@ class CompensationStrategy:
             cfg_obj = cfg
 
         self.enabled = bool(getattr(cfg_obj, "enabled", False))
-        self.verbose = bool(getattr(cfg_obj, "verbose", False))
         self.steps = tuple(int(x) for x in getattr(cfg_obj, "steps", []))
         self.diff_threshold = float(getattr(cfg_obj, "diff_threshold", 0.05))
         self.candidate_ratio = float(getattr(cfg_obj, "candidate_ratio", 0.2))
@@ -178,7 +177,7 @@ class CompensationStrategy:
         gp.scale_ori = torch.cat([gp.scale_ori, scale_ori_new], dim=0).contiguous()
         gp.opacity = torch.cat([gp.opacity, opacity_new], dim=0).contiguous()
 
-        if self.verbose:
+        if stats.sampled_total > 0:
             prefix = f"[Compensate step {step}] " if step is not None else "[Compensate] "
             print(
                 f"{prefix}added={stats.sampled_total} "

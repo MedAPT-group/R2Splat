@@ -1,16 +1,6 @@
 enabled: true
 
-# A simple multiplicative schedule applied to optimizer config each step.
-# lr(t)      = lr_base * lr_factor(t)
-# damping(t) = damping_base * damping_factor(t)  (only if second-order mode)
-
 lr:
-  type: "exp" # r2-gaussian like
-  warmup_steps: 0 # r2-gaussian like
-  min_factor: 0.1 # r2-gaussian like
-
-damping: # useless since we don't use second-order mode
-  type: "constant"
+  type: "exp"
   warmup_steps: 0
-  min_factor: 1.0
-
+  min_factor: 0.1

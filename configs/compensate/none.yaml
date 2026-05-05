@@ -1,5 +1,4 @@
 enabled: false
-verbose: false
 
 # Trigger steps for residual compensation.
 steps: []

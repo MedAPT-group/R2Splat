@@ -8,7 +8,6 @@
  * Kernels:
  * 1. compute_l2_grad_kernel: Computes L2 gradient d_l2 / d_pred
  * 2. compute_ssim_grad_pixel_parallel_kernel: Computes SSIM gradient per pixel
- * 3. compute_ssim_hessian_kernel: Computes second-order derivative (Hessian diagonal)
  * 
  * Author: Dy164
  * Date: 2025-12-18
@@ -205,160 +204,6 @@ __global__ void compute_ssim_grad_pixel_parallel_kernel(
 }
 
 // ============================================================================
-// SSIM Hessian Kernel (Second-Order Derivative - Full Implementation)
-// ============================================================================
-
-/**
- * Computes the diagonal of the Hessian matrix for SSIM loss using complete formula.
- * 
- * This kernel implements the full Hessian computation based on the formula:
- * H = -SSIM * (term1 + term2)
- * 
- * where:
- *   term1 = (d(log SSIM)/d(pred))^2
- *   term2 = Σ_i (h_i * f_i - g_i^2) / f_i^2
- * 
- * This matches the PyTorch reference implementation in ImageLossTorch._compute_ssim_hess_by_window
- * 
- * Each thread handles one pixel and accumulates Hessian contributions from all windows
- * that contain this pixel (pixel-parallel approach).
- */
-template <typename S, int MAX_WINDOW_SIZE = 32>
-__global__ void compute_ssim_hessian_kernel(
-    const S* __restrict__ prediction,
-    const S* __restrict__ target,
-    const S* __restrict__ gaussian_window,
-    const S* __restrict__ mu_r,
-    const S* __restrict__ mu_m,
-    const S* __restrict__ f1,
-    const S* __restrict__ f2,
-    const S* __restrict__ f3,
-    const S* __restrict__ f4,
-    const S* __restrict__ grad_output,
-    S* __restrict__ hessian_diag,
-    int B, int H, int W,
-    int window_size,
-    S lambda_ssim,
-    S C1, S C2
-) {
-    // Shared memory for Gaussian kernel
-    __shared__ S s_gaussian[MAX_WINDOW_SIZE * MAX_WINDOW_SIZE];
-    
-    int tid = threadIdx.x;
-    int kernel_size = window_size * window_size;
-    for (int i = tid; i < kernel_size; i += blockDim.x) {
-        s_gaussian[i] = gaussian_window[i];
-    }
-    __syncthreads();
-    
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_pixels = B * H * W;
-    if (idx >= total_pixels) return;
-    
-    // Decode batch and spatial indices
-    int b = idx / (H * W);
-    int spatial_idx = idx % (H * W);
-    int i = spatial_idx / W;
-    int j = spatial_idx % W;
-    
-    int pad_size = window_size / 2;
-    int out_H = H;
-    int out_W = W;
-    
-    S pred_val = prediction[idx];
-    S tgt_val = target[idx];
-    S grad_out = grad_output[0];
-    
-    S hess_sum = 0;
-    
-    // Iterate over all windows that contain this pixel
-    int out_i_min = max(0, i - pad_size);
-    int out_i_max = min(out_H - 1, i + pad_size);
-    int out_j_min = max(0, j - pad_size);
-    int out_j_max = min(out_W - 1, j + pad_size);
-    
-    for (int out_i = out_i_min; out_i <= out_i_max; ++out_i) {
-        for (int out_j = out_j_min; out_j <= out_j_max; ++out_j) {
-            // Local position within the window
-            int wi = i - (out_i - pad_size);
-            int wj = j - (out_j - pad_size);
-            
-            if (wi < 0 || wi >= window_size || wj < 0 || wj >= window_size) continue;
-            
-            // Get statistics for this window
-            int out_idx = b * out_H * out_W + out_i * out_W + out_j;
-            S mu_r_val = mu_r[out_idx];
-            S mu_m_val = mu_m[out_idx];
-            S f1_val = f1[out_idx];
-            S f2_val = f2[out_idx];
-            S f3_val = f3[out_idx];
-            S f4_val = f4[out_idx];
-            
-            // SSIM value for this window
-            S numer = f1_val * f2_val;
-            S denom = f3_val * f4_val;
-            S ssim_val = numer / denom;
-            
-            // Gaussian weight at this local position
-            S w = s_gaussian[wi * window_size + wj];
-            
-            // ========== First-order derivatives (g_i = d(f_i)/d(pred)) ==========
-            // g1 = d(2*mu_r*mu_m)/d(pred) = 2*mu_m*w
-            S g1 = 2 * w * mu_m_val;
-            // g2 = d(2*sigma_rm)/d(pred) = 2*w*(tgt - mu_m)
-            S g2 = 2 * w * (tgt_val - mu_m_val);
-            // g3 = d(mu_r²)/d(pred) = 2*mu_r*w
-            S g3 = 2 * w * mu_r_val;
-            // g4 = d(sigma_r_sq)/d(pred) = 2*w*(pred - mu_r)
-            S g4 = 2 * w * (pred_val - mu_r_val);
-            
-            // ========== Second-order derivatives (h_i = d²(f_i)/d(pred)²) ==========
-            S h1 = 0;  // d²(2*mu_r*mu_m)/d(pred)² = 0
-            S h2 = 0;  // d²(2*sigma_rm)/d(pred)² = 0
-            S h3 = 2 * w * w;  // d²(mu_r²)/d(pred)² = 2*w²
-            S h4 = 2 * w * (1 - w);  // d²(sigma_r_sq)/d(pred)² = 2*w*(1-w)
-            
-            // ========== Term 1: (log_deriv)² ==========
-            S log_deriv = g1/f1_val + g2/f2_val - g3/f3_val - g4/f4_val;
-            S term1 = log_deriv * log_deriv;
-            
-            // ========== Term 2: Σ_i (h_i*f_i - g_i²)/f_i² ==========
-            S term2 = (h1 * f1_val - g1 * g1) / (f1_val * f1_val)
-                    + (h2 * f2_val - g2 * g2) / (f2_val * f2_val)
-                    - (h3 * f3_val - g3 * g3) / (f3_val * f3_val)
-                    - (h4 * f4_val - g4 * g4) / (f4_val * f4_val);
-            
-            // ========== Full Hessian for this window ==========
-            // hess = -SSIM * (term1 + term2)
-            S window_hess = -ssim_val * (term1 + term2);
-            
-            hess_sum += window_hess / static_cast<S>(out_H * out_W);
-        }
-    }
-    
-    // Apply chain rule with lambda and grad_output (accumulate, don't overwrite)
-    hessian_diag[idx] += grad_out * lambda_ssim * hess_sum / static_cast<S>(B);
-}
-
-// ============================================================================
-// L2 Hessian Kernel
-// ============================================================================
-
-template <typename S>
-__global__ void compute_l2_hessian_kernel(
-    const S* __restrict__ grad_output,
-    S* __restrict__ hessian_diag,
-    S lambda_l2,
-    int total_elements
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total_elements) return;
-    
-    // d^2((x-t)^2)/dx^2 = 2, so Hessian = grad_output * lambda_l2 * 2/N
-    hessian_diag[idx] += grad_output[0] * lambda_l2 * static_cast<S>(2) / static_cast<S>(total_elements);
-}
-
-// ============================================================================
 // Launch Functions Implementation
 // ============================================================================
 
@@ -406,50 +251,6 @@ void launch_image_loss_l2_bwd(
     }
 }
 
-template <typename S>
-void launch_image_loss_l2_bwd2(
-    const S* __restrict__ prediction,
-    const S* __restrict__ target,
-    const S* __restrict__ gaussian_window,
-    const S* __restrict__ mu_r,
-    const S* __restrict__ mu_m,
-    const S* __restrict__ f1,
-    const S* __restrict__ f2,
-    const S* __restrict__ f3,
-    const S* __restrict__ f4,
-    const S* __restrict__ grad_output,
-    S* __restrict__ hessian_diag,
-    int B, int H, int W,
-    int window_size,
-    S lambda_l2,
-    S lambda_ssim,
-    S C1, S C2,
-    cudaStream_t stream
-) {
-    int total_pixels = B * H * W;
-    int threads = GSPLAT2CT_N_THREADS;
-    int blocks = (total_pixels + threads - 1) / threads;
-    
-    // Initialize hessian_diag to zero
-    cudaMemsetAsync(hessian_diag, 0, total_pixels * sizeof(S), stream);
-    
-    // L2 contributes 2/N to Hessian
-    compute_l2_hessian_kernel<S><<<blocks, threads, 0, stream>>>(
-        grad_output, hessian_diag, lambda_l2, total_pixels
-    );
-    
-    // Kernel: SSIM Hessian
-    if (window_size <= 32) {
-        compute_ssim_hessian_kernel<S, 32><<<blocks, threads, 0, stream>>>(
-            prediction, target, gaussian_window,
-            mu_r, mu_m, f1, f2, f3, f4,
-            grad_output, hessian_diag,
-            B, H, W, window_size,
-            lambda_ssim, C1, C2
-        );
-    }
-}
-
 // Explicit template instantiations
 template void launch_image_loss_l2_bwd<float>(
     const float*, const float*, const float*,
@@ -458,18 +259,6 @@ template void launch_image_loss_l2_bwd<float>(
 );
 
 template void launch_image_loss_l2_bwd<double>(
-    const double*, const double*, const double*,
-    const double*, const double*, const double*, const double*, const double*, const double*,
-    const double*, double*, int, int, int, int, double, double, double, double, cudaStream_t
-);
-
-template void launch_image_loss_l2_bwd2<float>(
-    const float*, const float*, const float*,
-    const float*, const float*, const float*, const float*, const float*, const float*,
-    const float*, float*, int, int, int, int, float, float, float, float, cudaStream_t
-);
-
-template void launch_image_loss_l2_bwd2<double>(
     const double*, const double*, const double*,
     const double*, const double*, const double*, const double*, const double*, const double*,
     const double*, double*, int, int, int, int, double, double, double, double, cudaStream_t
@@ -515,44 +304,6 @@ void launch_image_loss_l1_bwd(
         );
     }
 }
-
-template <typename S>
-void launch_image_loss_l1_bwd2(
-    const S* __restrict__ prediction,
-    const S* __restrict__ target,
-    const S* __restrict__ gaussian_window,
-    const S* __restrict__ mu_r,
-    const S* __restrict__ mu_m,
-    const S* __restrict__ f1,
-    const S* __restrict__ f2,
-    const S* __restrict__ f3,
-    const S* __restrict__ f4,
-    const S* __restrict__ grad_output,
-    S* __restrict__ hessian_diag,
-    int B, int H, int W,
-    int window_size,
-    S lambda_l1,
-    S lambda_ssim,
-    S C1, S C2,
-    cudaStream_t stream
-) {
-    int total_pixels = B * H * W;
-    int threads = GSPLAT2CT_N_THREADS;
-    int blocks = (total_pixels + threads - 1) / threads;
-
-    cudaMemsetAsync(hessian_diag, 0, total_pixels * sizeof(S), stream);
-
-    if (window_size <= 32) {
-        compute_ssim_hessian_kernel<S, 32><<<blocks, threads, 0, stream>>>(
-            prediction, target, gaussian_window,
-            mu_r, mu_m, f1, f2, f3, f4,
-            grad_output, hessian_diag,
-            B, H, W, window_size,
-            lambda_ssim, C1, C2
-        );
-    }
-}
-
 template void launch_image_loss_l1_bwd<float>(
     const float*, const float*, const float*,
     const float*, const float*, const float*, const float*, const float*, const float*,
@@ -560,18 +311,6 @@ template void launch_image_loss_l1_bwd<float>(
 );
 
 template void launch_image_loss_l1_bwd<double>(
-    const double*, const double*, const double*,
-    const double*, const double*, const double*, const double*, const double*, const double*,
-    const double*, double*, int, int, int, int, double, double, double, double, cudaStream_t
-);
-
-template void launch_image_loss_l1_bwd2<float>(
-    const float*, const float*, const float*,
-    const float*, const float*, const float*, const float*, const float*, const float*,
-    const float*, float*, int, int, int, int, float, float, float, float, cudaStream_t
-);
-
-template void launch_image_loss_l1_bwd2<double>(
     const double*, const double*, const double*,
     const double*, const double*, const double*, const double*, const double*, const double*,
     const double*, double*, int, int, int, int, double, double, double, double, cudaStream_t

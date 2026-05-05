@@ -1,9 +1,7 @@
 enabled: true
-verbose: true
 
 # Compute/use CUDA absgrad for densification when using first-order training
-# (``forward_backward1``). Second-order path has no absgrad tensor; falls back
-# to signed ``v_means2d`` like gsplat with absgrad=False.
+# (``forward_backward1``).
 absgrad: true
 
 # Densification schedule (gsplat-style: first refine when
@@ -30,4 +28,3 @@ split_scales_div: 1.6
 
 # Notes:
 # - max_screen_size / max_scale are not exposed in current strategy config.
-

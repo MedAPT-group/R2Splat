@@ -67,8 +67,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config-name",
-        default="r2gaussian",
-        help="Hydra config name passed to scripts.train, e.g. r2gaussian or default.",
+        default="r2gaussian_train",
+        help="Hydra config name passed to scripts.train.",
     )
     parser.add_argument(
         "--result-root",
@@ -263,7 +263,7 @@ def resolve_repo_root(repo_root_arg: str) -> Path:
         return script_candidate
 
     raise RuntimeError(
-        "Cannot resolve repository root. Please pass --repo-root /path/to/gsplat-3dgs2ct "
+        "Cannot resolve repository root. Please pass --repo-root /path/to/r2splat "
         "or set TRAIN_ALL_REPO_ROOT."
     )
 

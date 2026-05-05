@@ -1,7 +1,6 @@
 enabled: true
-verbose: false
 
-# CUDA absgrad (first-order only) or signed v_means2d (e.g. Newton path).
+# CUDA absgrad for densification statistics.
 absgrad: true
 
 refine_start_iter: 500
@@ -32,4 +31,3 @@ max_gaussians: 200000
 # child_scale = parent_scale / split_scales_div
 # Use 1.6 to match r2_gaussian default split shrink factor.
 split_scales_div: 1.6
-

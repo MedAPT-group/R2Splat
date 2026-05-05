@@ -33,13 +33,13 @@ Author: Dy164
 Date: 2026-03-19
 """
 
-import torch
-from typing import Optional, Tuple
-from .base import SecondForwardBackwardBase
-from .data import Params, Data, Config, ForwardResult, GradResult, HessResult
+from typing import Optional
+
+from .base import ForwardBackwardBase
+from .data import Config, Data, ForwardResult, Params
 
 
-class GS3DCTVoxelizeCUDA(SecondForwardBackwardBase):
+class GS3DCTVoxelizeCUDA(ForwardBackwardBase):
     """Forward-only voxelization from raw 3DGS parameters to voxel volume."""
 
     def __init__(self):
@@ -121,9 +121,6 @@ class GS3DCTVoxelizeCUDA(SecondForwardBackwardBase):
         )
 
     def forward_backward1(self, params, data, config=None):
-        raise NotImplementedError("GS3DCTVoxelizeCUDA is forward-only")
-
-    def forward_backward2(self, params, data, config=None):
         raise NotImplementedError("GS3DCTVoxelizeCUDA is forward-only")
 
 

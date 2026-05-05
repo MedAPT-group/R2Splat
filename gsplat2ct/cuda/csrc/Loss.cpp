@@ -199,71 +199,6 @@ torch::Tensor image_loss_l2_bwd(
     return grad_pred;
 }
 
-// ============================================================================
-// ImageLoss Backward (Second Order - Hessian Diagonal)
-// ============================================================================
-
-torch::Tensor image_loss_l2_bwd2(
-    const torch::Tensor& prediction,      // (B, H, W)
-    const torch::Tensor& target,          // (B, H, W)
-    const torch::Tensor& mu_r,            // (B, H, W)
-    const torch::Tensor& mu_m,            // (B, H, W)
-    const torch::Tensor& f1,              // (B, H, W)
-    const torch::Tensor& f2,              // (B, H, W)
-    const torch::Tensor& f3,              // (B, H, W)
-    const torch::Tensor& f4,              // (B, H, W)
-    const torch::Tensor& grad_output,     // scalar
-    int window_size,
-    float lambda_l2,
-    float lambda_ssim
-) {
-    GSPLAT2CT_CHECK_INPUT(prediction);
-    GSPLAT2CT_CHECK_INPUT(target);
-    
-    int B = prediction.size(0);
-    int H = prediction.size(1);
-    int W = prediction.size(2);
-    
-    // Create Gaussian window
-    float sigma = 1.5f;
-    auto gaussian = create_gaussian_kernel_2d(window_size, sigma)
-                    .to(prediction.device(), prediction.dtype())
-                    .contiguous();
-    
-    // Allocate output
-    auto hessian_diag = torch::zeros({B, H, W}, prediction.options());
-    
-    // SSIM constants
-    float C1 = 0.0001f;
-    float C2 = 0.0009f;
-    
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    
-    AT_DISPATCH_FLOATING_TYPES(prediction.scalar_type(), "image_loss_l2_bwd2", [&] {
-        launch_image_loss_l2_bwd2<scalar_t>(
-            prediction.data_ptr<scalar_t>(),
-            target.data_ptr<scalar_t>(),
-            gaussian.data_ptr<scalar_t>(),
-            mu_r.data_ptr<scalar_t>(),
-            mu_m.data_ptr<scalar_t>(),
-            f1.data_ptr<scalar_t>(),
-            f2.data_ptr<scalar_t>(),
-            f3.data_ptr<scalar_t>(),
-            f4.data_ptr<scalar_t>(),
-            grad_output.data_ptr<scalar_t>(),
-            hessian_diag.data_ptr<scalar_t>(),
-            B, H, W, window_size,
-            static_cast<scalar_t>(lambda_l2),
-            static_cast<scalar_t>(lambda_ssim),
-            static_cast<scalar_t>(C1),
-            static_cast<scalar_t>(C2),
-            stream
-        );
-    });
-    
-    return hessian_diag;
-}
-
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor>
@@ -380,54 +315,6 @@ torch::Tensor image_loss_l1_bwd(
     return grad_pred;
 }
 
-torch::Tensor image_loss_l1_bwd2(
-    const torch::Tensor& prediction,
-    const torch::Tensor& target,
-    const torch::Tensor& mu_r,
-    const torch::Tensor& mu_m,
-    const torch::Tensor& f1,
-    const torch::Tensor& f2,
-    const torch::Tensor& f3,
-    const torch::Tensor& f4,
-    const torch::Tensor& grad_output,
-    int window_size,
-    float lambda_l1,
-    float lambda_ssim
-) {
-    GSPLAT2CT_CHECK_INPUT(prediction);
-    GSPLAT2CT_CHECK_INPUT(target);
-    int B = prediction.size(0), H = prediction.size(1), W = prediction.size(2);
-    float sigma = 1.5f;
-    auto gaussian = create_gaussian_kernel_2d(window_size, sigma)
-                    .to(prediction.device(), prediction.dtype())
-                    .contiguous();
-    auto hessian_diag = torch::zeros({B, H, W}, prediction.options());
-    float C1 = 0.0001f, C2 = 0.0009f;
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    AT_DISPATCH_FLOATING_TYPES(prediction.scalar_type(), "image_loss_l1_bwd2", [&] {
-        launch_image_loss_l1_bwd2<scalar_t>(
-            prediction.data_ptr<scalar_t>(),
-            target.data_ptr<scalar_t>(),
-            gaussian.data_ptr<scalar_t>(),
-            mu_r.data_ptr<scalar_t>(),
-            mu_m.data_ptr<scalar_t>(),
-            f1.data_ptr<scalar_t>(),
-            f2.data_ptr<scalar_t>(),
-            f3.data_ptr<scalar_t>(),
-            f4.data_ptr<scalar_t>(),
-            grad_output.data_ptr<scalar_t>(),
-            hessian_diag.data_ptr<scalar_t>(),
-            B, H, W, window_size,
-            static_cast<scalar_t>(lambda_l1),
-            static_cast<scalar_t>(lambda_ssim),
-            static_cast<scalar_t>(C1),
-            static_cast<scalar_t>(C2),
-            stream
-        );
-    });
-    return hessian_diag;
-}
-
 // Backward-compatible aliases: image_loss_* now means L2 + SSIM.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor,
@@ -460,26 +347,6 @@ torch::Tensor image_loss_bwd(
     float lambda_ssim
 ) {
     return image_loss_l2_bwd(
-        prediction, target, mu_r, mu_m, f1, f2, f3, f4,
-        grad_output, window_size, lambda_l2, lambda_ssim
-    );
-}
-
-torch::Tensor image_loss_bwd2(
-    const torch::Tensor& prediction,
-    const torch::Tensor& target,
-    const torch::Tensor& mu_r,
-    const torch::Tensor& mu_m,
-    const torch::Tensor& f1,
-    const torch::Tensor& f2,
-    const torch::Tensor& f3,
-    const torch::Tensor& f4,
-    const torch::Tensor& grad_output,
-    int window_size,
-    float lambda_l2,
-    float lambda_ssim
-) {
-    return image_loss_l2_bwd2(
         prediction, target, mu_r, mu_m, f1, f2, f3, f4,
         grad_output, window_size, lambda_l2, lambda_ssim
     );
@@ -564,42 +431,6 @@ torch::Tensor volume_loss_bwd(
     });
     
     return grad_volume * lambda_tv;
-}
-
-// ============================================================================
-// VolumeLoss Backward (Second Order - Hessian Diagonal)
-// ============================================================================
-
-torch::Tensor volume_loss_bwd2(
-    const torch::Tensor& volume,          // (B, D, H, W)
-    const torch::Tensor& grad_output,     // scalar
-    float eps,
-    float lambda_tv
-) {
-    GSPLAT2CT_CHECK_INPUT(volume);
-    
-    int B = volume.size(0);
-    int D = volume.size(1);
-    int H = volume.size(2);
-    int W = volume.size(3);
-    
-    // Allocate output
-    auto hessian_diag = torch::zeros({B, D, H, W}, volume.options());
-    
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    
-    AT_DISPATCH_FLOATING_TYPES(volume.scalar_type(), "volume_loss_bwd2", [&] {
-        launch_volume_loss_bwd2<scalar_t>(
-            volume.data_ptr<scalar_t>(),
-            grad_output.data_ptr<scalar_t>(),
-            hessian_diag.data_ptr<scalar_t>(),
-            B, D, H, W,
-            static_cast<scalar_t>(eps),
-            stream
-        );
-    });
-    
-    return hessian_diag * lambda_tv;
 }
 
 } // namespace gsplat2ct

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 
 import math
 
@@ -22,44 +22,24 @@ def _factor(
 ) -> float:
     if max_steps <= 0:
         return 1.0
+
     warmup_steps = max(int(warmup_steps), 0)
     min_factor = float(min_factor)
-
     if warmup_steps > 0 and step < warmup_steps:
         return _clamp((step + 1) / warmup_steps, 0.0, 1.0)
 
-    # Progress in [0, 1]
     denom = max(max_steps - warmup_steps, 1)
     t = _clamp((step - warmup_steps) / denom, 0.0, 1.0)
+    schedule = str(schedule_type).lower()
 
-    st = str(schedule_type).lower()
-    if st in ("constant", "none"):
+    if schedule in ("constant", "none"):
         return 1.0
-    if st == "cosine":
-        # Cosine decay from 1 -> min_factor
+    if schedule == "cosine":
         return min_factor + 0.5 * (1.0 - min_factor) * (1.0 + math.cos(math.pi * t))
-    if st in ("exp", "exponential"):
-        # Exponential decay from 1 -> min_factor
-        # factor(t)=min_factor^(t)
-        return (min_factor ** t)
-    if st in ("log_cosine", "log-cosine", "logcosine"):
-        # Log-cosine whole-cycle schedule (U-shape in linear domain):
-        #   factor(0)   = 1
-        #   factor(0.5) = min_factor
-        #   factor(1)   = 1
-        #
-        # In log space it is a cosine with phase=0:
-        #   log f(t) = 0.5*log(min_factor) * (1 - cos(2*pi*t))
-        # This is equivalent to:
-        #   f(t) = min_factor^((1 - cos(2*pi*t))/2)
-        if min_factor <= 0.0:
-            raise ValueError(
-                f"log_cosine schedule requires min_factor > 0, got {min_factor}"
-            )
-        exponent = 0.5 * (1.0 - math.cos(2.0 * math.pi * t))
-        return float(min_factor ** exponent)
+    if schedule in ("exp", "exponential"):
+        return min_factor ** t
 
-    raise ValueError(f"Unknown schedule type: {schedule_type}")
+    raise ValueError(f"Unknown lr schedule type: {schedule_type}")
 
 
 @dataclass
@@ -68,179 +48,44 @@ class ScheduleConfig:
     lr_type: str = "constant"
     lr_warmup_steps: int = 0
     lr_min_factor: float = 1.0
-    damping_type: str = "constant"
-    damping_warmup_steps: int = 0
-    damping_min_factor: float = 1.0
-    max_update_type: str = "constant"
-    max_update_warmup_steps: int = 0
-    max_update_min_factor: float = 1.0
-    # EMA decay schedule (K-FAC style optimizers).
-    #
-    # To intuitively grow the EMA decay from, say, 0.9 -> 0.99 as training
-    # progresses, we parameterize the schedule on ``1 - ema_decay`` rather
-    # than on ``ema_decay`` itself, i.e.
-    #
-    #     ema_decay(t) = 1 - (1 - ema_decay_base) * factor(t)
-    #
-    # With ``min_factor < 1``, ``1 - ema`` shrinks over training and ``ema``
-    # grows towards 1, which matches the typical K-FAC warm-up heuristic.
-    # With ``min_factor == 1.0`` the schedule is a no-op.
-    ema_decay_type: str = "constant"
-    ema_decay_warmup_steps: int = 0
-    ema_decay_min_factor: float = 1.0
-    # Eigenvalue-floor schedule (K-FAC style optimizers). Multiplicative.
-    eig_clip_type: str = "constant"
-    eig_clip_warmup_steps: int = 0
-    eig_clip_min_factor: float = 1.0
 
 
 class OptimizerScheduler:
-    """Step-based scheduler that mutates optimizer config in-place."""
+    """Step-based learning-rate scheduler that mutates optimizer config in-place."""
 
     def __init__(self, cfg: ScheduleConfig, optimizer: OptimizerBase):
         self.cfg = cfg
         self.optimizer = optimizer
         self._base_lr: Dict[str, float] = dict(getattr(optimizer.config, "lr_map", {}))
-        self._base_damping: Dict[str, float] = dict(getattr(optimizer.config, "damping_map", {}))
-        self._base_max_update: Dict[str, float] = dict(
-            getattr(optimizer.config, "max_update_map", {})
-        )
-        self._base_ema_decay: Dict[str, float] = dict(
-            getattr(optimizer.config, "ema_decay_map", {})
-        )
-        self._base_eig_clip: Dict[str, float] = dict(
-            getattr(optimizer.config, "eig_clip_map", {})
-        )
 
     @classmethod
     def from_hydra(cls, cfg, optimizer: OptimizerBase) -> "OptimizerScheduler":
-        if isinstance(cfg, dict):
-            cfg_obj = type("_Cfg", (), cfg)
-        else:
-            cfg_obj = cfg
-
-        sc = ScheduleConfig(
-            enabled=bool(getattr(cfg_obj, "enabled", False)),
-            lr_type=str(getattr(getattr(cfg_obj, "lr", {}), "type", "constant"))
-            if hasattr(cfg_obj, "lr")
-            else str(getattr(cfg_obj, "lr_type", "constant")),
-            lr_warmup_steps=int(getattr(getattr(cfg_obj, "lr", {}), "warmup_steps", 0))
-            if hasattr(cfg_obj, "lr")
-            else int(getattr(cfg_obj, "lr_warmup_steps", 0)),
-            lr_min_factor=float(getattr(getattr(cfg_obj, "lr", {}), "min_factor", 1.0))
-            if hasattr(cfg_obj, "lr")
-            else float(getattr(cfg_obj, "lr_min_factor", 1.0)),
-            damping_type=str(getattr(getattr(cfg_obj, "damping", {}), "type", "constant"))
-            if hasattr(cfg_obj, "damping")
-            else str(getattr(cfg_obj, "damping_type", "constant")),
-            damping_warmup_steps=int(getattr(getattr(cfg_obj, "damping", {}), "warmup_steps", 0))
-            if hasattr(cfg_obj, "damping")
-            else int(getattr(cfg_obj, "damping_warmup_steps", 0)),
-            damping_min_factor=float(getattr(getattr(cfg_obj, "damping", {}), "min_factor", 1.0))
-            if hasattr(cfg_obj, "damping")
-            else float(getattr(cfg_obj, "damping_min_factor", 1.0)),
-            max_update_type=str(getattr(getattr(cfg_obj, "max_update", {}), "type", "constant"))
-            if hasattr(cfg_obj, "max_update")
-            else str(getattr(cfg_obj, "max_update_type", "constant")),
-            max_update_warmup_steps=int(
-                getattr(getattr(cfg_obj, "max_update", {}), "warmup_steps", 0)
-            )
-            if hasattr(cfg_obj, "max_update")
-            else int(getattr(cfg_obj, "max_update_warmup_steps", 0)),
-            max_update_min_factor=float(
-                getattr(getattr(cfg_obj, "max_update", {}), "min_factor", 1.0)
-            )
-            if hasattr(cfg_obj, "max_update")
-            else float(getattr(cfg_obj, "max_update_min_factor", 1.0)),
-            ema_decay_type=str(getattr(getattr(cfg_obj, "ema_decay", {}), "type", "constant"))
-            if hasattr(cfg_obj, "ema_decay")
-            else str(getattr(cfg_obj, "ema_decay_type", "constant")),
-            ema_decay_warmup_steps=int(
-                getattr(getattr(cfg_obj, "ema_decay", {}), "warmup_steps", 0)
-            )
-            if hasattr(cfg_obj, "ema_decay")
-            else int(getattr(cfg_obj, "ema_decay_warmup_steps", 0)),
-            ema_decay_min_factor=float(
-                getattr(getattr(cfg_obj, "ema_decay", {}), "min_factor", 1.0)
-            )
-            if hasattr(cfg_obj, "ema_decay")
-            else float(getattr(cfg_obj, "ema_decay_min_factor", 1.0)),
-            eig_clip_type=str(getattr(getattr(cfg_obj, "eig_clip", {}), "type", "constant"))
-            if hasattr(cfg_obj, "eig_clip")
-            else str(getattr(cfg_obj, "eig_clip_type", "constant")),
-            eig_clip_warmup_steps=int(
-                getattr(getattr(cfg_obj, "eig_clip", {}), "warmup_steps", 0)
-            )
-            if hasattr(cfg_obj, "eig_clip")
-            else int(getattr(cfg_obj, "eig_clip_warmup_steps", 0)),
-            eig_clip_min_factor=float(
-                getattr(getattr(cfg_obj, "eig_clip", {}), "min_factor", 1.0)
-            )
-            if hasattr(cfg_obj, "eig_clip")
-            else float(getattr(cfg_obj, "eig_clip_min_factor", 1.0)),
+        cfg_obj = type("_Cfg", (), cfg) if isinstance(cfg, dict) else cfg
+        lr_cfg = getattr(cfg_obj, "lr", {})
+        return cls(
+            ScheduleConfig(
+                enabled=bool(getattr(cfg_obj, "enabled", False)),
+                lr_type=str(getattr(lr_cfg, "type", getattr(cfg_obj, "lr_type", "constant"))),
+                lr_warmup_steps=int(
+                    getattr(lr_cfg, "warmup_steps", getattr(cfg_obj, "lr_warmup_steps", 0))
+                ),
+                lr_min_factor=float(
+                    getattr(lr_cfg, "min_factor", getattr(cfg_obj, "lr_min_factor", 1.0))
+                ),
+            ),
+            optimizer,
         )
-        return cls(sc, optimizer)
 
     def step(self, step: int, max_steps: int) -> None:
         if not self.cfg.enabled:
             return
 
-        lr_f = _factor(
+        lr_factor = _factor(
             schedule_type=self.cfg.lr_type,
             step=step,
             max_steps=max_steps,
             warmup_steps=self.cfg.lr_warmup_steps,
             min_factor=self.cfg.lr_min_factor,
         )
-        for name, base in self._base_lr.items():
-            self.optimizer.config.set_lr(name, float(base) * float(lr_f))
-
-        if self._base_damping:
-            d_f = _factor(
-                schedule_type=self.cfg.damping_type,
-                step=step,
-                max_steps=max_steps,
-                warmup_steps=self.cfg.damping_warmup_steps,
-                min_factor=self.cfg.damping_min_factor,
-            )
-            for name, base in self._base_damping.items():
-                self.optimizer.config.set_damping(name, float(base) * float(d_f))
-
-        if self._base_max_update and hasattr(self.optimizer.config, "set_max_update"):
-            u_f = _factor(
-                schedule_type=self.cfg.max_update_type,
-                step=step,
-                max_steps=max_steps,
-                warmup_steps=self.cfg.max_update_warmup_steps,
-                min_factor=self.cfg.max_update_min_factor,
-            )
-            for name, base in self._base_max_update.items():
-                self.optimizer.config.set_max_update(name, float(base) * float(u_f))
-
-        if self._base_ema_decay and hasattr(self.optimizer.config, "set_ema_decay"):
-            e_f = _factor(
-                schedule_type=self.cfg.ema_decay_type,
-                step=step,
-                max_steps=max_steps,
-                warmup_steps=self.cfg.ema_decay_warmup_steps,
-                min_factor=self.cfg.ema_decay_min_factor,
-            )
-            # Schedule 1 - ema_decay multiplicatively so that ema_decay
-            # grows towards 1 as factor shrinks below 1.
-            for name, base in self._base_ema_decay.items():
-                one_minus_base = max(1.0 - float(base), 0.0)
-                scaled = one_minus_base * float(e_f)
-                scaled = min(max(scaled, 0.0), 1.0)
-                self.optimizer.config.set_ema_decay(name, 1.0 - scaled)
-
-        if self._base_eig_clip and hasattr(self.optimizer.config, "set_eig_clip"):
-            c_f = _factor(
-                schedule_type=self.cfg.eig_clip_type,
-                step=step,
-                max_steps=max_steps,
-                warmup_steps=self.cfg.eig_clip_warmup_steps,
-                min_factor=self.cfg.eig_clip_min_factor,
-            )
-            for name, base in self._base_eig_clip.items():
-                self.optimizer.config.set_eig_clip(name, float(base) * float(c_f))
-
+        for name, base_lr in self._base_lr.items():
+            self.optimizer.config.set_lr(name, float(base_lr) * float(lr_factor))

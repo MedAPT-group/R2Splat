@@ -74,7 +74,6 @@ class DefaultStrategy:
             cfg_obj = cfg
 
         self.enabled = bool(getattr(cfg_obj, "enabled", False))
-        self.verbose = bool(getattr(cfg_obj, "verbose", False))
         self.absgrad = bool(getattr(cfg_obj, "absgrad", False))
 
         self.refine_start_iter = int(getattr(cfg_obj, "refine_start_iter", 0))
@@ -312,7 +311,7 @@ class DefaultStrategy:
             self._resize_running_stats(keep)
             changed = True
 
-        if self.verbose and (pruned_n > 0 or dupli_n > 0 or split_n > 0):
+        if pruned_n > 0 or dupli_n > 0 or split_n > 0:
             prefix = f"[Strategy step {step}] " if step is not None else "[Strategy] "
             print(
                 f"{prefix}split={split_n}, duplicate={dupli_n}, prune={pruned_n}, "

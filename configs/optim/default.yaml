@@ -1,60 +1,14 @@
-# Optimizer configuration.
-#
-# When use_second_order is false, only lr_* fields are used (Adam).
-# When true, damping_* fields are also used (Newton family).
+# Adam optimizer configuration.
 
-use_second_order: false
+lr_means: 0.0002
+lr_quats: 0.001
+lr_scale_ori: 0.005
+# Raw opacity has no activation, so this is lower than the R2Gaussian density LR.
+lr_opacity: 0.0001
 
-# Per-parameter learning rates
-lr_means: 0.0002 # r2-gaussian like
-lr_quats: 0.001 # r2-gaussian like
-lr_scale_ori: 0.005 # r2-gaussian like
-lr_opacity: 0.0001 # r2-gaussian like
-# r2-gaussian uses softplus activated opacities whereas we use no-activation
-# after training, r2-gaussian opacities mainly lie in [5e-3, 5e-2], where the gradient approximately lie in [5e-3, 5e-2]
-# for no-activation opacities, the gradient is 1.0
-# therefore, we use 1e-2 times the r2-gaussian learning rate: 1e-2 * 1e-2 = 1e-4
+beta1: 0.9
+beta2: 0.999
+eps: 1.0e-8
 
-# Adam hyper-parameters (first-order only)
-beta1: 0.9 # pytorch adam default
-beta2: 0.999 # pytorch adam default
-eps: 1.0e-8 # pytorch adam default
-
-# Keep false unless signed opacity (positive + negative kernels) is needed.
+# Compensation can inject signed kernels; keep false for standard positive density.
 allow_negative_opacity: false
-
-# Newton hyper-parameters (second-order only)
-second_order_optimizer: "newton_diag_clamp" # options: newton_diag_clamp | newton | reduced_newton | kfac
-hess_mode: "DIAGONAL"
-grad_strategy: "RAW"
-hess_strategy: "RAW"
-# Optional beta warmup for grad/hess EMA-like first moments.
-# Typical usage: start at low beta for fast response, then ramp to high beta
-# for stronger denoising.
-warmup_beta_enabled: false
-warmup_beta_schedule: "COSINE" # options: COSINE | LINEAR
-warmup_beta_steps: 0
-warmup_beta1_g_start: 0.1
-warmup_beta1_g_end: 0.9
-warmup_beta1_h_start: 0.1
-warmup_beta1_h_end: 0.9
-# In warmup-beta mode, default is no bias correction as requested.
-warmup_beta_bias_correction: false
-verbose: false
-damping_means: 1.0e-3
-damping_quats: 1.0e-3
-damping_scale_ori: 1.0e-3
-damping_opacity: 1.0e-3
-clamp_means: 1.0e-5
-clamp_quats: 1.0e-5
-clamp_scale_ori: 1.0e-5
-clamp_opacity: 1.0e-5
-max_update_means: 1.0e9
-max_update_quats: 1.0e9
-max_update_scale_ori: 1.0e9
-max_update_opacity: 1.0e9
-
-# Reduced-space Newton only.
-reduced_svd_threshold: 1.0e-8
-reduced_max_scale_rank: 2
-max_rotation_angle: 5.0e-2

@@ -1,4 +1,3 @@
 # Disable topology refinement (no grow/split/prune).
 enabled: false
-verbose: false
 absgrad: false

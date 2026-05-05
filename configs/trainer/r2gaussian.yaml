@@ -20,8 +20,8 @@ lambda_l1: 1.0
 lambda_ssim: 0.25
 window_size: 11
 
-# TV regularization
-lambda_tv: 0.015 # 0.05
+# TV regularization: 0.05 / 3 to match R2Gaussian's edge-mean TV scale.
+lambda_tv: 0.0166666667
 tv_vol_size: 32
 
 # Operator parameters (keep project defaults)

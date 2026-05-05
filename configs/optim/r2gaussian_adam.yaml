@@ -1,17 +1,12 @@
-# R2Gaussian-like first-order optimizer settings.
-use_second_order: false
+# R2Gaussian-like Adam settings.
 
-# Per-parameter initial learning rates (mapped from R2Gaussian names):
-# position -> means, rotation -> quats, scaling -> scale_ori, density -> opacity
 lr_means: 0.0002
 lr_quats: 0.001
 lr_scale_ori: 0.005
-lr_opacity: 0.0005 # different from R2Gaussian original cuz we use raw opacity without activation
+lr_opacity: 0.0005
 
-# Adam hyper-parameters
 beta1: 0.9
 beta2: 0.999
 eps: 1.0e-8
 
-# Compensation strategy can inject negative kernels; disable opacity clamping.
 allow_negative_opacity: false

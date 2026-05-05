@@ -32,13 +32,13 @@ Author: Dy164
 Date: 2026-03-19
 """
 
-import torch
-from typing import Optional, Tuple
-from .base import SecondForwardBackwardBase
-from .data import Params, Data, Config, ForwardResult, GradResult, HessResult
+from typing import Optional
+
+from .base import ForwardBackwardBase
+from .data import Config, Data, ForwardResult, Params
 
 
-class GS3DCTRasterizeCUDA(SecondForwardBackwardBase):
+class GS3DCTRasterizeCUDA(ForwardBackwardBase):
     """Forward-only rasterization from raw 3DGS parameters to rendered images."""
 
     def __init__(self):
@@ -90,7 +90,7 @@ class GS3DCTRasterizeCUDA(SecondForwardBackwardBase):
 
         # Stage 1: WorldToImageProjection
         means2d, cov2d_3x3, radii = world_to_image_projection_fwd(
-            means, covars, viewmats, Ks, img_dim1, img_dim0
+            means, covars, viewmats, Ks, img_dim1, img_dim0, eps_blur
         )
 
         # Stage 2: ConicsMu
@@ -120,9 +120,6 @@ class GS3DCTRasterizeCUDA(SecondForwardBackwardBase):
         )
 
     def forward_backward1(self, params, data, config=None):
-        raise NotImplementedError("GS3DCTRasterizeCUDA is forward-only")
-
-    def forward_backward2(self, params, data, config=None):
         raise NotImplementedError("GS3DCTRasterizeCUDA is forward-only")
 
 

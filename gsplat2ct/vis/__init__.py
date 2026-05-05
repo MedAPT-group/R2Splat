@@ -1,27 +1,5 @@
-"""Visualization utilities for CT reconstruction results."""
+"""Visualization utilities for evaluation outputs."""
 
-from .plotting import (
-    save_gaussian_state_3d_frame,
-    save_projection_comparison,
-    save_projection_triplet,
-    save_volume_comparison,
-    save_loss_curve,
-)
-from .video import (
-    GaussianStateVideoConfig,
-    GaussianStateVideoRecorder,
-    ProjectionVideoRecorder,
-    VideoVisConfig,
-)
+from .plotting import save_projection_comparison, save_volume_comparison
 
-__all__ = [
-    "save_gaussian_state_3d_frame",
-    "save_projection_comparison",
-    "save_projection_triplet",
-    "save_volume_comparison",
-    "save_loss_curve",
-    "GaussianStateVideoConfig",
-    "GaussianStateVideoRecorder",
-    "ProjectionVideoRecorder",
-    "VideoVisConfig",
-]
+__all__ = ["save_projection_comparison", "save_volume_comparison"]

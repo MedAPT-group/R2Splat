@@ -1,5 +1,4 @@
 enabled: true
-verbose: true
 
 # Trigger steps for compensation sampling.
 steps: [2950, 5950, 8950, 11950]

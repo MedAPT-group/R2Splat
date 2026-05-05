@@ -1,56 +1,19 @@
-"""
-gsplat2ct: 3D Gaussian Splatting to CT with Second-Order Optimization
-"""
+"""gsplat2ct: fast first-order 3D Gaussian Splatting for CT reconstruction."""
 
 __version__ = "0.1.0"
 
-# Import from ops module (new structure)
-from .ops import (
-    # Base class
-    SecondForwardBackwardBase,
-    # Generic data structures
-    ParameterLike,
-    Params,
-    Data,
-    Config,
-    ForwardResult,
-    GradResult,
-    HessResult,
-    # MLP classification
-    MLPClassificationCUDA,
-    MLPClassificationTorch,
-    MLPClassificationAutograd,
-    create_mlp_classification,
-)
-
-# Import optimizers
-from .optim import (
-    OptimizerConfig,
-    MLPOptimizerConfig,
-    SecondOrderOptimizerBase,
-    MLPSecondOrderOptimizer,
-)
+from .ops import Config, Data, ForwardBackwardBase, ForwardResult, GradResult, Params
+from .optim import FirstOrderConfig, GS3DCTAdamOptimizer, create_gs3d_ct_adam
 
 __all__ = [
     "__version__",
-    # Base class
-    "SecondForwardBackwardBase",
-    # Generic data structures
-    "ParameterLike",
+    "ForwardBackwardBase",
     "Params",
     "Data",
     "Config",
     "ForwardResult",
     "GradResult",
-    "HessResult",
-    # MLP classification
-    "MLPClassificationCUDA",
-    "MLPClassificationTorch",
-    "MLPClassificationAutograd",
-    "create_mlp_classification",
-    # Optimizers
-    "OptimizerConfig",
-    "MLPOptimizerConfig",
-    "SecondOrderOptimizerBase",
-    "MLPSecondOrderOptimizer",
+    "FirstOrderConfig",
+    "GS3DCTAdamOptimizer",
+    "create_gs3d_ct_adam",
 ]
