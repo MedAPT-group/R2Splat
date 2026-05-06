@@ -19,6 +19,7 @@ void launch_world_to_image_projection_fwd(
     uint32_t dim1,
     uint32_t dim0,
     S eps_blur,
+    S radius_clip,
     S* __restrict__ means2d,
     S* __restrict__ cov2d_3x3,
     int32_t* __restrict__ radii,

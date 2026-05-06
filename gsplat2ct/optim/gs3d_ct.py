@@ -30,10 +30,8 @@ class GS3DCTAdamOptimizer(FirstOrderOptimizerBase):
 
     def _apply_constraints(self) -> None:
         _renormalize_quats(self.params)
-        opacity = self.params.get("opacity")
-        allow_negative_opacity = bool(getattr(self.config, "allow_negative_opacity", False))
-        if opacity is not None and not allow_negative_opacity:
-            opacity.data.clamp_(min=0.0)
+        # Opacity positivity is enforced by Softplus in render/voxelize paths.
+        pass
 
 
 def create_gs3d_ct_adam(

@@ -79,6 +79,7 @@ __global__ void world_to_image_projection_fwd_kernel(
     uint32_t dim1,
     uint32_t dim0,
     S eps_blur, // note that eps_blur is equal to eps2d in ConicsMu
+    S radius_clip,
     S* __restrict__ means2d,           // [C*N, 2]
     S* __restrict__ cov2d_3x3,        // [C*N, 6]
     int32_t* __restrict__ radii,       // [C*N]
@@ -255,9 +256,9 @@ __global__ void world_to_image_projection_fwd_kernel(
     const S half_trace = static_cast<S>(0.5) * (a_blur + d_blur);
     const S v1 = half_trace + sqrt(max(static_cast<S>(0.01),
                                        half_trace * half_trace - det_blur));
-    S radius = ceil(static_cast<S>(3.0) * sqrt(v1));
+    S radius = ceil(radius_clip * sqrt(v1));
 
-    if (radius <= static_cast<S>(0)) {
+    if (!isfinite(radius) || radius <= static_cast<S>(0)) {
         radii[idx] = 0;
         return;
     }
@@ -288,6 +289,7 @@ void launch_world_to_image_projection_fwd(
     uint32_t dim1,
     uint32_t dim0,
     S eps_blur,
+    S radius_clip,
     S* __restrict__ means2d,
     S* __restrict__ cov2d_3x3,
     int32_t* __restrict__ radii,
@@ -302,7 +304,7 @@ void launch_world_to_image_projection_fwd(
 
     world_to_image_projection_fwd_kernel<S><<<blocks, threads, 0, stream>>>(
         means, covars, viewmats, Ks,
-        dim1, dim0, eps_blur,
+        dim1, dim0, eps_blur, radius_clip,
         means2d, cov2d_3x3, radii,
         C, N
     );
@@ -311,13 +313,13 @@ void launch_world_to_image_projection_fwd(
 // Explicit template instantiations
 template void launch_world_to_image_projection_fwd<float>(
     const float*, const float*, const float*, const float*,
-    uint32_t, uint32_t, float,
+    uint32_t, uint32_t, float, float,
     float*, float*, int32_t*,
     uint32_t, uint32_t, cudaStream_t
 );
 template void launch_world_to_image_projection_fwd<double>(
     const double*, const double*, const double*, const double*,
-    uint32_t, uint32_t, double,
+    uint32_t, uint32_t, double, double,
     double*, double*, int32_t*,
     uint32_t, uint32_t, cudaStream_t
 );

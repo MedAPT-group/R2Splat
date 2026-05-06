@@ -1,8 +1,8 @@
 """
-GS3DCTVoxelizeCUDA: Forward-only voxelization from raw 3DGS parameters.
+GS3DCTVoxelizeCUDA: Forward-only voxelization from transformed 3DGS parameters.
 
 Pipeline:
-    (means, quats, scale_ori, opacity)
+    (means, quats, scale_ori, activated opacity)
         -> [ParameterTransform]          -> covars (N, 6), max_scales (N,)
         -> [WorldToVolumeMapping]        -> means3d_v (N,3), conics (N,6), radii (N,3)
         -> [VoxelizeToVoxels]            -> render_output (dim0, dim1, dim2)
@@ -13,7 +13,7 @@ Expected params:
     - means:     (N, 3)   world-space Gaussian centres
     - quats:     (N, 4)   unit quaternions (w, x, y, z)
     - scale_ori: (N, 3)   raw scale parameters
-    - opacity:   (N,)     per-Gaussian opacity
+    - opacity:   (N,)     per-Gaussian activated opacity
 
 Expected data:
     - ranges:    (3,)     physical extent per axis
@@ -25,9 +25,9 @@ Expected config:
     - vol_dim0:      int     voxel grid z dimension (slowest)
     - vol_tile_size: int     (default 4)
     - eps3d:         float   (default 1e-4)
-    - radius_clip:   float   (default 3.0)
-    - scale_min:     float   (default 0.01)
-    - scale_max:     float   (default 2.0)
+    - radius_clip:   float   (default 3.0 for Gaussian, 1.0 for Beta)
+    - scale_min:     float   world-space activated scale lower bound
+    - scale_max:     float   world-space activated scale upper bound
 
 Author: Dy164
 Date: 2026-03-19
@@ -41,7 +41,7 @@ from .data import Config, Data, ForwardResult, Params
 
 
 class GS3DCTVoxelizeCUDA(ForwardBackwardBase):
-    """Forward-only voxelization from raw 3DGS parameters to voxel volume."""
+    """Forward-only voxelization to voxel volume."""
 
     def __init__(self):
         self.initialized = False
@@ -91,10 +91,10 @@ class GS3DCTVoxelizeCUDA(ForwardBackwardBase):
         vol_dim0 = config.get('vol_dim0')
         vol_tile_size = config.get('vol_tile_size', 4)
         eps3d = config.get('eps3d', 1e-4)
-        radius_clip = config.get('radius_clip', 3.0)
         scale_min = config.get('scale_min', 0.01)
         scale_max = config.get('scale_max', 2.0)
         primitive_type = str(config.get('primitive_type', 'beta' if beta is not None else 'gaussian')).lower()
+        radius_clip = config.get('radius_clip', 1.0 if primitive_type == "beta" else 3.0)
         beta_gamma_init = config.get('beta_gamma_init', 3.5)
 
         # Stage 0: ParameterTransform

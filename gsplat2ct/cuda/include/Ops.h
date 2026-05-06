@@ -195,7 +195,8 @@ world_to_image_projection_fwd_tensor(
     const torch::Tensor& Ks,
     uint32_t dim1,
     uint32_t dim0,
-    float eps_blur);
+    float eps_blur,
+    float radius_clip);
 
 std::tuple<torch::Tensor, torch::Tensor>
 world_to_image_projection_bwd_tensor(

@@ -24,6 +24,7 @@ from gsplat2ct.data.ctproj import CTImageDataset, CTImageParser
 from gsplat2ct.eval.evaluator import ProjectionEvaluator, VolumeEvaluator
 from gsplat2ct.model.ct_initializer import initialize_from_metadata
 from gsplat2ct.model.gaussian_params import GaussianParams
+from gsplat2ct.model.scale import resolve_scale_bounds
 from gsplat2ct.ops.data import Config, Data, ForwardResult, Params
 from gsplat2ct.ops.gs3d_ct_train import GS3DCTLossCUDA
 from gsplat2ct.optim.base import FirstOrderConfig
@@ -108,10 +109,21 @@ def make_train_config(
     vol_dims: Tuple[int, int, int],
     *,
     lambda_tv: Optional[float] = None,
+    scale_min_world: Optional[float] = None,
+    scale_max_world: Optional[float] = None,
 ) -> Config:
+    if scale_min_world is None or scale_max_world is None:
+        raise ValueError("make_train_config expects world-space scale bounds")
+
     img_h, img_w = img_shape
     vol_w, vol_d, vol_h = vol_dims
     trainer = cfg.trainer
+    primitive_type = str(getattr(cfg.model, "primitive_type", "gaussian")).lower()
+    radius_clip = float(getattr(trainer, "radius_clip", 3.0))
+    img_radius_clip = float(getattr(trainer, "img_radius_clip", 3.0))
+    if primitive_type == "beta":
+        radius_clip = float(getattr(trainer, "beta_radius_clip", 1.0))
+        img_radius_clip = float(getattr(trainer, "beta_img_radius_clip", 1.0))
 
     op_cfg = Config()
     op_cfg.set(
@@ -127,11 +139,12 @@ def make_train_config(
         vol_dim0=vol_h,
         vol_tile_size=trainer.vol_tile_size,
         eps3d=trainer.eps3d,
-        radius_clip=trainer.radius_clip,
+        radius_clip=radius_clip,
+        img_radius_clip=img_radius_clip,
         lambda_tv=float(trainer.lambda_tv if lambda_tv is None else lambda_tv),
-        scale_min=cfg.model.scale_min,
-        scale_max=cfg.model.scale_max,
-        primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
+        scale_min=float(scale_min_world),
+        scale_max=float(scale_max_world),
+        primitive_type=primitive_type,
         beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
         absgrad=bool(getattr(getattr(cfg, "strategy", None), "absgrad", False)),
     )
@@ -254,7 +267,6 @@ def build_optimizer(cfg: DictConfig, params: Params) -> GS3DCTAdamOptimizer:
         beta2=float(cfg.optim.beta2),
         eps=float(cfg.optim.eps),
     )
-    config.allow_negative_opacity = bool(getattr(cfg.optim, "allow_negative_opacity", False))
     return GS3DCTAdamOptimizer(params, config)
 
 
@@ -262,6 +274,8 @@ def train(cfg: DictConfig) -> None:
     _maybe_init_wandb(cfg)
 
     device = torch.device(cfg.trainer.device if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_result_dir = cfg.exp.result_dir
     parent_dir = os.path.dirname(base_result_dir)
@@ -276,6 +290,18 @@ def train(cfg: DictConfig) -> None:
 
     print("[1/5] Loading dataset...")
     parser = CTImageParser(cfg.exp.data_dir)
+    scale_min_world, scale_max_world, volume_to_world = resolve_scale_bounds(
+        cfg.model.scale_min_relative,
+        cfg.model.scale_max_relative,
+        parser.get_scanner_params(),
+    )
+    print(
+        "   Scale bounds: "
+        f"relative=[{float(cfg.model.scale_min_relative):.6g}, "
+        f"{float(cfg.model.scale_max_relative):.6g}] "
+        f"* max(sVoxel)={volume_to_world:.6g} -> "
+        f"world=[{scale_min_world:.6g}, {scale_max_world:.6g}]"
+    )
     trainset = CTImageDataset(parser, split="train")
     try:
         testset = CTImageDataset(parser, split="test")
@@ -319,10 +345,12 @@ def train(cfg: DictConfig) -> None:
         )
         if init_result.coarse_volume_wdh is not None:
             print(f"   Coarse volume reconstructed: {tuple(init_result.coarse_volume_wdh.shape)}")
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
         gp = GaussianParams.from_points(
             init_result.sampled_points_n4,
-            scale_min=cfg.model.scale_min,
-            scale_max=cfg.model.scale_max,
+            scale_min=scale_min_world,
+            scale_max=scale_max_world,
             global_scale=cfg.model.global_scale,
             init_opa_scale=cfg.model.init_opa_scale,
             init_scale_multiplier=cfg.model.init_scale_multiplier,
@@ -334,8 +362,8 @@ def train(cfg: DictConfig) -> None:
     elif init_source == "file":
         gp = GaussianParams.from_data_dir(
             cfg.exp.data_dir,
-            scale_min=cfg.model.scale_min,
-            scale_max=cfg.model.scale_max,
+            scale_min=scale_min_world,
+            scale_max=scale_max_world,
             global_scale=cfg.model.global_scale,
             init_opa_scale=cfg.model.init_opa_scale,
             init_scale_multiplier=cfg.model.init_scale_multiplier,
@@ -353,7 +381,17 @@ def train(cfg: DictConfig) -> None:
 
     print("[3/5] Creating operator...")
     operator = GS3DCTLossCUDA()
-    operator.initialize(params, make_train_config(cfg, (2, 2), (2, 2, 2), lambda_tv=0.0))
+    operator.initialize(
+        params,
+        make_train_config(
+            cfg,
+            (2, 2),
+            (2, 2, 2),
+            lambda_tv=0.0,
+            scale_min_world=scale_min_world,
+            scale_max_world=scale_max_world,
+        ),
+    )
 
     print("[4/5] Creating Adam optimizer...")
     optimizer = build_optimizer(cfg, params)
@@ -396,7 +434,19 @@ def train(cfg: DictConfig) -> None:
     perm_cursor = 0
     progress = tqdm(range(max_steps), desc="Training")
 
-    _run_eval(params, cfg, evalset, vol_gt, bbox, volume_shape_wdh, device, vis_dir, step=0)
+    _run_eval(
+        params,
+        cfg,
+        evalset,
+        vol_gt,
+        bbox,
+        volume_shape_wdh,
+        device,
+        vis_dir,
+        step=0,
+        scale_min_world=scale_min_world,
+        scale_max_world=scale_max_world,
+    )
 
     for step in progress:
         scheduler.step(step, max_steps)
@@ -440,7 +490,14 @@ def train(cfg: DictConfig) -> None:
             vol_centers=vol_centers,
             device=device,
         )
-        op_config = make_train_config(cfg, (img_h, img_w), vol_dims, lambda_tv=lambda_tv)
+        op_config = make_train_config(
+            cfg,
+            (img_h, img_w),
+            vol_dims,
+            lambda_tv=lambda_tv,
+            scale_min_world=scale_min_world,
+            scale_max_world=scale_max_world,
+        )
 
         fwd, grad = operator.forward_backward1(params, data_obj, op_config)
         optimizer.add_grad(grad)
@@ -463,20 +520,18 @@ def train(cfg: DictConfig) -> None:
 
         skip_optimizer_update = False
         if strategy.want_refine(step):
-            grow_scale3d_abs = None
-            if bbox is not None:
-                grow_scale3d_abs = float(strategy.grow_scale3d) * float((bbox[1] - bbox[0]).max().item())
+            grow_scale3d_abs = float(strategy.grow_scale3d) * float(volume_to_world)
             decision = strategy.decide(
                 gp,
-                scale_min=cfg.model.scale_min,
-                scale_max=cfg.model.scale_max,
+                scale_min=scale_min_world,
+                scale_max=scale_max_world,
                 grow_scale3d_abs=grow_scale3d_abs,
             )
             changed, transition = strategy.apply(
                 gp,
                 decision,
-                scale_min=cfg.model.scale_min,
-                scale_max=cfg.model.scale_max,
+                scale_min=scale_min_world,
+                scale_max=scale_max_world,
                 bbox=bbox,
                 step=step,
             )
@@ -495,7 +550,8 @@ def train(cfg: DictConfig) -> None:
                 optimizer.params = params
                 optimizer.zero_grad()
 
-        optimizer.step()
+        if not skip_optimizer_update:
+            optimizer.step()
         optimizer.zero_grad()
 
         progress.set_postfix(
@@ -527,7 +583,19 @@ def train(cfg: DictConfig) -> None:
             pass
 
         if step > 0 and step % int(cfg.trainer.eval_interval) == 0:
-            _run_eval(params, cfg, evalset, vol_gt, bbox, volume_shape_wdh, device, vis_dir, step)
+            _run_eval(
+                params,
+                cfg,
+                evalset,
+                vol_gt,
+                bbox,
+                volume_shape_wdh,
+                device,
+                vis_dir,
+                step,
+                scale_min_world=scale_min_world,
+                scale_max_world=scale_max_world,
+            )
 
         if step in cfg.trainer.save_steps:
             gp.update_from_params(params)
@@ -550,13 +618,16 @@ def _run_eval(
     device: torch.device,
     vis_dir: str,
     step: int,
+    *,
+    scale_min_world: float,
+    scale_max_world: float,
 ) -> None:
     log_dict: Dict[str, float] = {}
 
     proj_eval = ProjectionEvaluator(
         params,
-        scale_min=cfg.model.scale_min,
-        scale_max=cfg.model.scale_max,
+        scale_min=scale_min_world,
+        scale_max=scale_max_world,
         eps_blur=cfg.trainer.eps_blur,
         ssim_window=int(getattr(cfg.trainer, "ssim_window", 11)),
         primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
@@ -585,8 +656,8 @@ def _run_eval(
     if vol_gt is not None and bbox is not None and volume_shape_wdh is not None:
         vol_eval = VolumeEvaluator(
             params,
-            scale_min=cfg.model.scale_min,
-            scale_max=cfg.model.scale_max,
+            scale_min=scale_min_world,
+            scale_max=scale_max_world,
             eps3d=cfg.trainer.eps3d,
             ssim_window=int(getattr(cfg.trainer, "ssim_window", 11)),
             primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),

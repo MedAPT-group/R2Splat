@@ -18,9 +18,10 @@ ssim_window: 11
 save_projection_npy: true
 save_volume_npy: true
 
-# Must match training model config when loading a checkpoint.
-scale_min: 0.001
-scale_max: 1.0
+# Must match the relative training model config when loading a checkpoint.
+# Validation multiplies these by max(scanner.sVoxel) before calling CUDA ops.
+scale_min_relative: 0.0005
+scale_max_relative: 0.5
 eps_blur: 1.0e-8
 eps3d: 1.0e-8
 primitive_type: gaussian

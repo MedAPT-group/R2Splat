@@ -1,0 +1,15 @@
+# Top-level config for chest_cone 25-views using Gaussian primitives.
+defaults:
+  - base
+  - model: default
+  - trainer: r2gaussian
+  - optim: r2gaussian_adam
+  - schedule: r2gaussian_exp
+  - exp: 25_views
+  - init: r2gaussian
+  - strategy: r2gaussian
+  - vis: r2gaussian
+  - _self_
+
+exp:
+  result_dir: "output/0_chest_cone_25_views_gaussian"

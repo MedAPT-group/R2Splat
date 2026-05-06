@@ -21,6 +21,8 @@ from tqdm import tqdm
 
 from gsplat2ct.data.ctproj import CTImageDataset, CTImageParser
 from gsplat2ct.model.gaussian_params import GaussianParams
+from gsplat2ct.model.opacity import opacity_activation
+from gsplat2ct.model.scale import resolve_scale_bounds
 from gsplat2ct.eval.evaluator import VolumeEvaluator
 from gsplat2ct.eval.metric import metric_proj
 from gsplat2ct.vis.plotting import save_volume_comparison
@@ -33,6 +35,9 @@ def _evaluate_projections(
     device: torch.device,
     split_name: str,
     output_dir: str,
+    *,
+    scale_min_world: float,
+    scale_max_world: float,
 ) -> dict:
     """Render every view in *dataset*, compute metrics, and save comparison images."""
     from gsplat2ct.ops.data import Params, Data, Config
@@ -64,7 +69,8 @@ def _evaluate_projections(
         C = viewmats.shape[0]
 
         opacity_raw = params.get("opacity").data
-        opacity_2d = opacity_raw.unsqueeze(0).expand(C, -1).contiguous()
+        opacity = opacity_activation(opacity_raw)
+        opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         rast_params = Params()
         rast_params.add_param("means", params.get("means"))
@@ -78,12 +84,18 @@ def _evaluate_projections(
         data_obj.set(viewmats=viewmats, Ks=K)
 
         img_h, img_w = gt.shape[1], gt.shape[2]
+        primitive_type = str(
+            getattr(cfg, "primitive_type", "beta" if params.get("beta") is not None else "gaussian")
+        ).lower()
         op_cfg = Config()
         op_cfg.set(
             img_dim1=img_w, img_dim0=img_h, tile_size=16,
             eps_blur=eps_blur,
-            scale_min=cfg.scale_min, scale_max=cfg.scale_max,
-            primitive_type=str(getattr(cfg, "primitive_type", "beta" if params.get("beta") is not None else "gaussian")),
+            img_radius_clip=float(
+                getattr(cfg, "img_radius_clip", 1.0 if primitive_type == "beta" else 3.0)
+            ),
+            scale_min=scale_min_world, scale_max=scale_max_world,
+            primitive_type=primitive_type,
             beta_gamma_init=float(getattr(cfg, "beta_gamma_init", 3.5)),
         )
 
@@ -162,6 +174,18 @@ def main(cfg: DictConfig) -> None:
     # Load data
     print("[1/4] Loading dataset...")
     parser = CTImageParser(cfg.data_dir)
+    scale_min_world, scale_max_world, volume_to_world = resolve_scale_bounds(
+        cfg.scale_min_relative,
+        cfg.scale_max_relative,
+        parser.get_scanner_params(),
+    )
+    print(
+        "   Scale bounds: "
+        f"relative=[{float(cfg.scale_min_relative):.6g}, "
+        f"{float(cfg.scale_max_relative):.6g}] "
+        f"* max(sVoxel)={volume_to_world:.6g} -> "
+        f"world=[{scale_min_world:.6g}, {scale_max_world:.6g}]"
+    )
     trainset = CTImageDataset(parser, split="train")
     testset = None
     try:
@@ -182,12 +206,26 @@ def main(cfg: DictConfig) -> None:
     print("[3/4] Evaluating projections...")
     saved_arrays: Dict[str, str] = {}
     train_metrics = _evaluate_projections(
-        params, trainset, cfg, device, "train", cfg.result_dir
+        params,
+        trainset,
+        cfg,
+        device,
+        "train",
+        cfg.result_dir,
+        scale_min_world=scale_min_world,
+        scale_max_world=scale_max_world,
     )
     test_metrics = {}
     if testset is not None:
         test_metrics = _evaluate_projections(
-            params, testset, cfg, device, "test", cfg.result_dir
+            params,
+            testset,
+            cfg,
+            device,
+            "test",
+            cfg.result_dir,
+            scale_min_world=scale_min_world,
+            scale_max_world=scale_max_world,
         )
         if "pred_projection_npy" in test_metrics:
             saved_arrays["pred_projection_npy"] = test_metrics["pred_projection_npy"]
@@ -207,8 +245,8 @@ def main(cfg: DictConfig) -> None:
         bbox = torch.tensor(parser.bbox, dtype=torch.float32)
         vol_eval = VolumeEvaluator(
             params,
-            scale_min=cfg.scale_min,
-            scale_max=cfg.scale_max,
+            scale_min=scale_min_world,
+            scale_max=scale_max_world,
             eps3d=float(getattr(cfg, "eps3d", 1e-4)),
             ssim_window=cfg.ssim_window,
             primitive_type=gp.primitive_type,

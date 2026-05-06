@@ -10,9 +10,10 @@ defaults:
   - validate
   - _self_
 
-# Match r2gaussian training bounds (model.scale_min/scale_max).
-scale_min: 0.0005
-scale_max: 0.5
+# Match relative R2Gaussian training bounds. Validation multiplies them by
+# max(scanner.sVoxel) before calling CUDA ops.
+scale_min_relative: 0.0005
+scale_max_relative: 0.5
 
 # Persist prediction/GT arrays for downstream analysis.
 save_projection_npy: true

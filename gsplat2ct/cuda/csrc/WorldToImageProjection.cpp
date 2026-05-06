@@ -41,7 +41,8 @@ world_to_image_projection_fwd_tensor(
     const torch::Tensor& Ks,          // [C, 3, 3]
     uint32_t dim1,
     uint32_t dim0,
-    float eps_blur
+    float eps_blur,
+    float radius_clip
 ) {
     GSPLAT2CT_DEVICE_GUARD(means);
     GSPLAT2CT_CHECK_INPUT(means);
@@ -62,6 +63,8 @@ world_to_image_projection_fwd_tensor(
     TORCH_CHECK(Ks.dim() == 3 && Ks.size(1) == 3 && Ks.size(2) == 3,
                 "Ks must be 3D [C, 3, 3], got shape ",
                 Ks.sizes());
+    TORCH_CHECK(radius_clip > 0.0f,
+                "radius_clip must be positive, got ", radius_clip);
 
     const int64_t N = means.size(0);
     const int64_t C = viewmats.size(0);
@@ -101,6 +104,7 @@ world_to_image_projection_fwd_tensor(
                 dim1,
                 dim0,
                 static_cast<scalar_t>(eps_blur),
+                static_cast<scalar_t>(radius_clip),
                 means2d.data_ptr<scalar_t>(),
                 cov2d_3x3.data_ptr<scalar_t>(),
                 radii.data_ptr<int32_t>(),

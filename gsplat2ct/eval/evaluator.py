@@ -15,6 +15,7 @@ from gsplat2ct.ops.data import Params, Data, Config, ForwardResult
 from gsplat2ct.ops.gs3d_ct_rasterize import GS3DCTRasterizeCUDA
 from gsplat2ct.ops.gs3d_ct_voxelize import GS3DCTVoxelizeCUDA
 from gsplat2ct.eval.metric import metric_proj, metric_vol
+from gsplat2ct.model.opacity import opacity_activation
 
 
 class _ParamWrapper:
@@ -27,8 +28,8 @@ class ProjectionEvaluator:
 
     Args:
         params: Current Gaussian parameters (``Params`` container).
-        scale_min: ParameterTransform lower bound (must match training).
-        scale_max: ParameterTransform upper bound.
+        scale_min: World-space ParameterTransform lower bound.
+        scale_max: World-space ParameterTransform upper bound.
         eps_blur: Conic blur epsilon.
         ssim_window: SSIM kernel size.
     """
@@ -86,10 +87,10 @@ class ProjectionEvaluator:
 
             viewmats = torch.linalg.inv(c2w).contiguous()
             C = viewmats.shape[0]
-            N = self.params.get("means").data.shape[0]
 
             opacity_raw = self.params.get("opacity").data
-            opacity_2d = opacity_raw.unsqueeze(0).expand(C, -1).contiguous()
+            opacity = opacity_activation(opacity_raw)
+            opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
             rast_params = Params()
             rast_params.add_param("means", self.params.get("means"))
@@ -109,6 +110,7 @@ class ProjectionEvaluator:
                 img_dim0=img_h,
                 tile_size=16,
                 eps_blur=self.eps_blur,
+                img_radius_clip=1.0 if self.primitive_type == "beta" else 3.0,
                 scale_min=self.scale_min,
                 scale_max=self.scale_max,
                 primitive_type=self.primitive_type,
@@ -146,8 +148,8 @@ class VolumeEvaluator:
 
     Args:
         params: Current Gaussian parameters (``Params`` container).
-        scale_min: ParameterTransform lower bound.
-        scale_max: ParameterTransform upper bound.
+        scale_min: World-space ParameterTransform lower bound.
+        scale_max: World-space ParameterTransform upper bound.
         eps3d: World-to-volume mapping epsilon.
         ssim_window: SSIM kernel size for 3-D SSIM.
     """
@@ -203,14 +205,24 @@ class VolumeEvaluator:
             vol_dim0=H,
             vol_tile_size=4,
             eps3d=self.eps3d,
-            radius_clip=3.0,
+            radius_clip=1.0 if self.primitive_type == "beta" else 3.0,
             scale_min=self.scale_min,
             scale_max=self.scale_max,
             primitive_type=self.primitive_type,
             beta_gamma_init=self.beta_gamma_init,
         )
 
-        fwd = self._op.forward_only(self.params, data_obj, cfg)
+        vox_params = Params()
+        vox_params.add_param("means", self.params.get("means"))
+        vox_params.add_param("quats", self.params.get("quats"))
+        vox_params.add_param("scale_ori", self.params.get("scale_ori"))
+        vox_params.add_param(
+            "opacity", _ParamWrapper(opacity_activation(self.params.get("opacity").data))
+        )
+        if self.params.get("beta") is not None:
+            vox_params.add_param("beta", self.params.get("beta"))
+
+        fwd = self._op.forward_only(vox_params, data_obj, cfg)
         pred_vol = fwd.outputs["render_output"]
 
         if pred_vol.ndim >= 3:

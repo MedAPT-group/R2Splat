@@ -5,6 +5,11 @@ type: grad2d_based_adc
 # (``forward_backward1``).
 absgrad: true
 
+# R2Gaussian's CUDA backward multiplies pixel-center gradients by W/2 and H/2
+# before Python densification sees grad_means2D. Our CUDA returns pixel-center
+# gradients, so keep this true for both Gaussian and beta primitives.
+scale_grad_by_image: true
+
 # Densification schedule (gsplat-style: first refine when
 # ``step > refine_start_iter`` and ``step % refine_every == 0``).
 refine_start_iter: 500

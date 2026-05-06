@@ -27,6 +27,18 @@ namespace gsplat2ct {
 
 namespace cg = cooperative_groups;
 
+template <typename OpS>
+__device__ __forceinline__ uint32_t clamp_tile_bound(OpS value, uint32_t upper) {
+    if (!isfinite(value) || value <= static_cast<OpS>(0)) {
+        return 0u;
+    }
+    const OpS upper_f = static_cast<OpS>(upper);
+    if (value >= upper_f) {
+        return upper;
+    }
+    return static_cast<uint32_t>(value);
+}
+
 // ============================================================================
 // First Pass Kernel: Compute tiles per Gaussian
 // ============================================================================
@@ -69,6 +81,10 @@ __global__ void compute_tiles_per_gauss_kernel(
     // Get 2D center
     const OpS mean_x = static_cast<OpS>(means2d[2 * idx]);
     const OpS mean_y = static_cast<OpS>(means2d[2 * idx + 1]);
+    if (!isfinite(mean_x) || !isfinite(mean_y)) {
+        tiles_per_gauss[idx] = 0;
+        return;
+    }
     
     // Convert to tile coordinates
     const OpS tile_size_f = static_cast<OpS>(tile_size);
@@ -78,10 +94,14 @@ __global__ void compute_tiles_per_gauss_kernel(
     
     // Compute tile bounding box (tile_min inclusive, tile_max exclusive)
     // dim1 = x = columns, dim0 = y = rows
-    uint32_t tile_min_dim1 = min(max(0u, static_cast<uint32_t>(floor(tile_x - tile_radius))), n_tiles_dim1);
-    uint32_t tile_min_dim0 = min(max(0u, static_cast<uint32_t>(floor(tile_y - tile_radius))), n_tiles_dim0);
-    uint32_t tile_max_dim1 = min(max(0u, static_cast<uint32_t>(ceil(tile_x + tile_radius))), n_tiles_dim1);
-    uint32_t tile_max_dim0 = min(max(0u, static_cast<uint32_t>(ceil(tile_y + tile_radius))), n_tiles_dim0);
+    uint32_t tile_min_dim1 = clamp_tile_bound(floor(tile_x - tile_radius), n_tiles_dim1);
+    uint32_t tile_min_dim0 = clamp_tile_bound(floor(tile_y - tile_radius), n_tiles_dim0);
+    uint32_t tile_max_dim1 = clamp_tile_bound(ceil(tile_x + tile_radius), n_tiles_dim1);
+    uint32_t tile_max_dim0 = clamp_tile_bound(ceil(tile_y + tile_radius), n_tiles_dim0);
+    if (tile_max_dim1 <= tile_min_dim1 || tile_max_dim0 <= tile_min_dim0) {
+        tiles_per_gauss[idx] = 0;
+        return;
+    }
     
     // Count tiles
     tiles_per_gauss[idx] = static_cast<int32_t>(
@@ -142,6 +162,9 @@ __global__ void generate_isect_records_kernel(
     // Get 2D center
     const OpS mean_x = static_cast<OpS>(means2d[2 * idx]);
     const OpS mean_y = static_cast<OpS>(means2d[2 * idx + 1]);
+    if (!isfinite(mean_x) || !isfinite(mean_y)) {
+        return;
+    }
     
     // Convert to tile coordinates
     const OpS tile_size_f = static_cast<OpS>(tile_size);
@@ -151,10 +174,13 @@ __global__ void generate_isect_records_kernel(
     
     // Compute tile bounding box (same as first pass)
     // dim1 = x = columns, dim0 = y = rows
-    uint32_t tile_min_dim1 = min(max(0u, static_cast<uint32_t>(floor(tile_x - tile_radius))), n_tiles_dim1);
-    uint32_t tile_min_dim0 = min(max(0u, static_cast<uint32_t>(floor(tile_y - tile_radius))), n_tiles_dim0);
-    uint32_t tile_max_dim1 = min(max(0u, static_cast<uint32_t>(ceil(tile_x + tile_radius))), n_tiles_dim1);
-    uint32_t tile_max_dim0 = min(max(0u, static_cast<uint32_t>(ceil(tile_y + tile_radius))), n_tiles_dim0);
+    uint32_t tile_min_dim1 = clamp_tile_bound(floor(tile_x - tile_radius), n_tiles_dim1);
+    uint32_t tile_min_dim0 = clamp_tile_bound(floor(tile_y - tile_radius), n_tiles_dim0);
+    uint32_t tile_max_dim1 = clamp_tile_bound(ceil(tile_x + tile_radius), n_tiles_dim1);
+    uint32_t tile_max_dim0 = clamp_tile_bound(ceil(tile_y + tile_radius), n_tiles_dim0);
+    if (tile_max_dim1 <= tile_min_dim1 || tile_max_dim0 <= tile_min_dim0) {
+        return;
+    }
     
     // Compute camera ID from flattened index
     // idx = cid * N + gid, so cid = idx / N

@@ -8,6 +8,7 @@ import torch
 
 from ..eval.metric import ssim2d
 from ..model.beta import activated_beta_terms, beta_path_log_grad
+from ..model.opacity import opacity_activation, opacity_activation_grad
 from .base import ForwardBackwardBase
 from .data import Config, Data, ForwardResult, GradResult, Params
 
@@ -20,6 +21,10 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
     - raw parameters -> covariance transform
     - rasterize projections -> image loss
     - voxelize a sampled sub-volume -> anisotropic TV loss
+
+    ``scale_min`` / ``scale_max`` in the config must already be world-space
+    activated scale bounds.  High-level scripts convert the r2_gaussian-style
+    relative config values by multiplying ``max(scanner.sVoxel)``.
     """
 
     def __init__(self):
@@ -86,18 +91,20 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
         means = params.get("means").data
         quats = params.get("quats").data
         scale_ori = params.get("scale_ori").data
-        opacity = params.get("opacity").data
+        raw_opacity = params.get("opacity").data
         beta_param = params.get("beta")
         beta = beta_param.data if beta_param is not None else None
         primitive_type = str(
             config.get("primitive_type", "beta" if beta is not None else "gaussian")
         ).lower()
+        radius_clip_default = 1.0 if primitive_type == "beta" else 3.0
+        img_radius_clip_default = 1.0 if primitive_type == "beta" else 3.0
 
         return (
             means,
             quats,
             scale_ori,
-            opacity,
+            raw_opacity,
             beta,
             primitive_type,
             data.get("viewmats"),
@@ -109,6 +116,7 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             config.get("img_dim0"),
             config.get("img_tile_size", 16),
             config.get("eps_blur", 0.3),
+            config.get("img_radius_clip", img_radius_clip_default),
             float(config.get("lambda_l1", 1.0)),
             float(config.get("lambda_dssim", 0.0)),
             int(config.get("ssim_window", 11)),
@@ -117,7 +125,7 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             config.get("vol_dim0"),
             config.get("vol_tile_size", 4),
             config.get("eps3d", 1e-4),
-            config.get("radius_clip", 3.0),
+            config.get("radius_clip", radius_clip_default),
             config.get("lambda_tv", 1.0),
             config.get("scale_min", 0.01),
             config.get("scale_max", 2.0),
@@ -150,7 +158,7 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             means,
             quats,
             scale_ori,
-            opacity,
+            raw_opacity,
             beta,
             primitive_type,
             viewmats,
@@ -162,6 +170,7 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             img_dim0,
             img_tile_size,
             eps_blur,
+            img_radius_clip,
             lambda_l1,
             lambda_dssim,
             ssim_window,
@@ -178,11 +187,12 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
         ) = self._extract(params, data, config)
 
         C = viewmats.shape[0]
+        opacity = opacity_activation(raw_opacity)
         opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         covars, max_scales = parameter_transform_fwd(quats, scale_ori, scale_min, scale_max)
         means2d, cov2d_3x3, radii_2d = world_to_image_projection_fwd(
-            means, covars, viewmats, Ks, img_dim1, img_dim0, eps_blur
+            means, covars, viewmats, Ks, img_dim1, img_dim0, eps_blur, img_radius_clip
         )
         conics_2d, mus = conics_mu_fwd(cov2d_3x3, eps_blur)
         if primitive_type == "beta":
@@ -331,7 +341,7 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             means,
             quats,
             scale_ori,
-            opacity,
+            raw_opacity,
             beta,
             primitive_type,
             viewmats,
@@ -343,6 +353,7 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             img_dim0,
             img_tile_size,
             eps_blur,
+            img_radius_clip,
             lambda_l1,
             lambda_dssim,
             ssim_window,
@@ -359,11 +370,12 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
         ) = self._extract(params, data, config)
 
         C = viewmats.shape[0]
+        opacity = opacity_activation(raw_opacity)
         opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
 
         covars, max_scales = parameter_transform_fwd(quats, scale_ori, scale_min, scale_max)
         means2d, cov2d_3x3, radii_2d = world_to_image_projection_fwd(
-            means, covars, viewmats, Ks, img_dim1, img_dim0, eps_blur
+            means, covars, viewmats, Ks, img_dim1, img_dim0, eps_blur, img_radius_clip
         )
         conics_2d, mus = conics_mu_fwd(cov2d_3x3, eps_blur)
         if primitive_type == "beta":
@@ -580,6 +592,7 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
         v_covars_total = v_covars_rast + v_covars_vol
         v_means_total = v_means_rast + v_means_vol
         v_opacity_total = v_opacity_rast.sum(dim=0) + v_opacity_vol
+        v_opacity_raw = v_opacity_total * opacity_activation_grad(raw_opacity)
         v_quats, v_scale_ori = parameter_transform_bwd(
             quats, scale_ori, scale_min, scale_max, v_covars_total
         )
@@ -599,7 +612,7 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             "means": v_means_total,
             "quats": v_quats,
             "scale_ori": v_scale_ori,
-            "opacity": v_opacity_total,
+            "opacity": v_opacity_raw,
         }
         if primitive_type == "beta" and v_beta_raw is not None:
             param_grads["beta"] = v_beta_raw

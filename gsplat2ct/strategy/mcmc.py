@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import torch
 
 from gsplat2ct.model.gaussian_params import GaussianParams
+from gsplat2ct.model.opacity import inverse_opacity_activation, opacity_activation
 
 from .default import StrategyOutput, StrategyTransition, _quat_to_rotmat
 
@@ -99,12 +100,18 @@ class KAMCMCStrategy:
         return changed, transition
 
     def _sampling_probs(self, gp: GaussianParams) -> torch.Tensor:
-        weights = gp.opacity.detach().abs().to(torch.float32).clamp_min(1e-12)
+        weights = (
+            opacity_activation(gp.opacity)
+            .detach()
+            .to(torch.float32)
+            .clamp_min(1e-12)
+        )
         return weights / weights.sum().clamp_min(1e-12)
 
     @torch.no_grad()
     def _relocate_dead(self, gp: GaussianParams) -> int:
-        dead = gp.opacity.detach().abs() <= self.min_density
+        opacity_active = opacity_activation(gp.opacity)
+        dead = opacity_active.detach() <= self.min_density
         n_dead = int(dead.sum().item())
         if n_dead <= 0 or n_dead >= gp.num_gaussians:
             return 0
@@ -117,9 +124,11 @@ class KAMCMCStrategy:
         gp.means[dead_idx] = gp.means[donor]
         gp.quats[dead_idx] = gp.quats[donor]
         gp.scale_ori[dead_idx] = gp.scale_ori[donor]
-        donor_opa = gp.opacity[donor] * 0.5
+        donor_opa = inverse_opacity_activation(
+            (opacity_active[donor] * 0.5).clamp_min(self.min_density)
+        )
         gp.opacity[donor] = donor_opa
-        gp.opacity[dead_idx] = donor_opa.abs().clamp_min(self.min_density).to(gp.opacity.dtype)
+        gp.opacity[dead_idx] = donor_opa.to(gp.opacity.dtype)
         if gp.beta is not None:
             gp.beta[dead_idx] = gp.beta[donor]
         return n_dead
@@ -144,7 +153,8 @@ class KAMCMCStrategy:
         means_new = gp.means[donor] + offsets
         quats_new = gp.quats[donor]
         scale_ori_new = gp.scale_ori[donor]
-        opa_new = gp.opacity[donor] * 0.5
+        opacity_active = opacity_activation(gp.opacity)
+        opa_new = inverse_opacity_activation(opacity_active[donor] * 0.5)
         gp.opacity[donor] = opa_new
 
         gp.means = torch.cat([gp.means, means_new], dim=0).contiguous()

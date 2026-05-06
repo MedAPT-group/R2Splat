@@ -30,7 +30,13 @@ eps_blur: 1.0e-8
 img_tile_size: 16
 vol_tile_size: 8
 eps3d: 1.0e-8
+# 3D voxelization support radius. Beta has compact support at radius 1.
 radius_clip: 3.0
+beta_radius_clip: 1.0
+# 2D projection/rasterization tile radius. Gaussian uses 3 sigma; Beta uses
+# its exact compact support radius to avoid rasterizing empty tiles.
+img_radius_clip: 3.0
+beta_img_radius_clip: 1.0
 
 # Evaluation
 eval_interval: 1000

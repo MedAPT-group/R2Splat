@@ -1,12 +1,12 @@
 # Gaussian model initialization parameters.
 #
-# scale_min / scale_max are shared between parameter initialization
-# (GaussianParams) and the training operator (ParameterTransform kernel).
-# Always keep them in sync.
+# scale_min_relative / scale_max_relative follow R2Gaussian: they are relative
+# fractions of max(scanner.sVoxel). Training/validation scripts multiply them
+# into world-space bounds before calling GaussianParams and CUDA operators.
 
 global_scale: 1.0
 init_opa_scale: 1.0 # 0.8
 init_scale_multiplier: 1.0 # 0.2
 
-scale_min: 0.0005 # r2-gaussian like
-scale_max: 0.5 # r2-gaussian like
+scale_min_relative: 0.0005
+scale_max_relative: 0.5

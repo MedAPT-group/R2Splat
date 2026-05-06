@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import torch
 
 from gsplat2ct.model.gaussian_params import GaussianParams
+from gsplat2ct.model.opacity import inverse_opacity_activation, opacity_activation
 
 
 def _quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
@@ -58,9 +59,11 @@ class DefaultStrategy:
     """Densification aligned with gsplat ``DefaultStrategy`` / 3DGS.
 
     While ``enabled`` and ``step < refine_stop_iter``, each backward adds to
-    ``grad2d`` / ``count`` like gsplat ``_update_state``: only (camera, Gaussian)
-    pairs with ``radii_2d > 0``, gradient scaled by
-    ``(width/2)*n_cameras`` and ``(height/2)*n_cameras``, norm accumulated.
+    ``grad2d`` / ``count`` like r2_gaussian: only (camera, Gaussian) pairs
+    with ``radii_2d > 0`` are accumulated.  r2_gaussian multiplies the
+    pixel-center gradient by ``W/2`` and ``H/2`` inside the rasterizer backward
+    before Python sees ``grad_means2D``; our CUDA returns pixel-center
+    gradients, so the collector applies the same screen-coordinate scaling.
 
     Refine when ``step > refine_start_iter`` and ``step % refine_every == 0``
     (strict ``>``, same as gsplat).
@@ -76,6 +79,7 @@ class DefaultStrategy:
 
         self.enabled = bool(getattr(cfg_obj, "enabled", False))
         self.absgrad = bool(getattr(cfg_obj, "absgrad", False))
+        self.scale_grad_by_image = bool(getattr(cfg_obj, "scale_grad_by_image", True))
 
         self.refine_start_iter = int(getattr(cfg_obj, "refine_start_iter", 0))
         self.refine_stop_iter = int(getattr(cfg_obj, "refine_stop_iter", 1 << 30))
@@ -141,8 +145,10 @@ class DefaultStrategy:
         else:
             g = v_means2d.detach().clone()
 
-        g[..., 0] *= (float(img_w) / 2.0) * float(n_cameras)
-        g[..., 1] *= (float(img_h) / 2.0) * float(n_cameras)
+        if self.scale_grad_by_image:
+            g[..., 0] *= float(img_w) / 2.0
+            g[..., 1] *= float(img_h) / 2.0
+        _ = n_cameras  # Kept in the interface; r2-compatible stats ignore batch size.
 
         sel = radii_2d > 0
         if not sel.any():
@@ -171,8 +177,6 @@ class DefaultStrategy:
     ) -> StrategyOutput:
         N = gp.num_gaussians
         device = gp.means.device
-
-        opacity = gp.opacity
 
         if self._grad2d is None or self._grad2d.numel() != N:
             accum = torch.zeros(N, device=device, dtype=torch.float32)
@@ -235,7 +239,9 @@ class DefaultStrategy:
                 quats_new = gp.quats[sel]
                 scale_ori_new = gp.scale_ori[sel]
                 beta_new = gp.beta[sel] if gp.beta is not None else None
-                opa_new = gp.opacity[sel] * 0.5
+                opa_new = inverse_opacity_activation(
+                    opacity_activation(gp.opacity[sel]) * 0.5
+                )
                 gp.opacity[sel] = opa_new
                 gp.means = torch.cat([gp.means, means_new], dim=0).contiguous()
                 gp.quats = torch.cat([gp.quats, quats_new], dim=0).contiguous()
@@ -273,7 +279,9 @@ class DefaultStrategy:
                 )
 
                 quats_split = gp.quats[sel].repeat(2, 1)
-                opa_split = (gp.opacity[sel] * 0.5).repeat(2)
+                opa_split = inverse_opacity_activation(
+                    opacity_activation(gp.opacity[sel]) * 0.5
+                ).repeat(2)
                 beta_split = gp.beta[sel].repeat(2) if gp.beta is not None else None
 
                 keep_parent = torch.ones(gp.num_gaussians, dtype=torch.bool, device=device)
@@ -292,7 +300,8 @@ class DefaultStrategy:
 
         # --- prune last: from current opacities (gsplat _prune_gs), after grow ---
         pruned_n = 0
-        prune = gp.opacity.abs() < self.prune_opa_abs
+        opacity_active = opacity_activation(gp.opacity)
+        prune = opacity_active < self.prune_opa_abs
         if bbox is not None:
             bbox_dev = bbox.to(device=device, dtype=gp.means.dtype)
             mins = bbox_dev[0]
@@ -303,7 +312,7 @@ class DefaultStrategy:
             n = gp.num_gaussians
             if (n - int(prune.sum().item())) < self.min_remaining:
                 keep_n = self.min_remaining
-                topk = torch.topk(gp.opacity.abs(), k=min(keep_n, n), largest=True).indices
+                topk = torch.topk(opacity_active, k=min(keep_n, n), largest=True).indices
                 new_prune = torch.ones(n, dtype=torch.bool, device=device)
                 new_prune[topk] = False
                 prune = new_prune

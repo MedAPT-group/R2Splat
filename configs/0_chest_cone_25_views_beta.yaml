@@ -1,0 +1,23 @@
+# Top-level config for chest_cone 25-views using Beta primitives.
+defaults:
+  - base
+  - model: beta
+  - trainer: r2gaussian
+  - optim: beta_adam
+  - schedule: r2gaussian_exp
+  - exp: 25_views
+  - init: r2gaussian
+  - strategy: r2beta
+  - vis: r2gaussian
+  - _self_
+
+# Chest-cone overrides (tighter beta training / densification than generic r2beta).
+model:
+  # NN-based init scale × 3 so Beta footprint matches Gaussian-like visibility at step 0.
+  init_scale_multiplier: 3.0
+
+optim:
+  lr_beta: 0.005
+
+exp:
+  result_dir: "output/0_chest_cone_25_views_beta"

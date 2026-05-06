@@ -1,8 +1,8 @@
 """
-GS3DCTRasterizeCUDA: Forward-only rasterization from raw 3DGS parameters.
+GS3DCTRasterizeCUDA: Forward-only rasterization from transformed 3DGS parameters.
 
 Pipeline:
-    (means, quats, scale_ori, opacity)
+    (means, quats, scale_ori, activated opacity)
         -> [ParameterTransform]          -> covars (N, 6)
         -> [WorldToImageProjection]      -> means2d (C,N,2), cov2d_3x3 (C,N,6)
         -> [ConicsMu]                    -> conics (C,N,3), mus (C,N)
@@ -14,7 +14,7 @@ Expected params:
     - means:     (N, 3)   world-space Gaussian centres
     - quats:     (N, 4)   unit quaternions (w, x, y, z)
     - scale_ori: (N, 3)   raw scale parameters
-    - opacity:   (C, N)   per-Gaussian per-camera opacity
+    - opacity:   (C, N)   per-Gaussian per-camera activated opacity
 
 Expected data:
     - viewmats:  (C, 4, 4)  camera extrinsics
@@ -25,8 +25,8 @@ Expected config:
     - img_dim0:     int     image height
     - tile_size:    int     (default 16)
     - eps_blur:     float   (default 0.3)
-    - scale_min:    float   (default 0.01)
-    - scale_max:    float   (default 2.0)
+    - scale_min:    float   world-space activated scale lower bound
+    - scale_max:    float   world-space activated scale upper bound
 
 Author: Dy164
 Date: 2026-03-19
@@ -40,7 +40,7 @@ from .data import Config, Data, ForwardResult, Params
 
 
 class GS3DCTRasterizeCUDA(ForwardBackwardBase):
-    """Forward-only rasterization from raw 3DGS parameters to rendered images."""
+    """Forward-only rasterization to rendered images."""
 
     def __init__(self):
         self.initialized = False
@@ -86,6 +86,18 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         viewmats = data.get('viewmats')
         Ks = data.get('Ks')
         C = viewmats.shape[0]
+        base_device = means.device
+        for name, tensor in (
+            ("quats", quats),
+            ("scale_ori", scale_ori),
+            ("opacity", opacity),
+            ("viewmats", viewmats),
+            ("Ks", Ks),
+        ):
+            if tensor.device != base_device:
+                raise ValueError(
+                    f"{name} is on {tensor.device}, but means is on {base_device}"
+                )
 
         img_dim1 = config.get('img_dim1')
         img_dim0 = config.get('img_dim0')
@@ -95,6 +107,7 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         scale_max = config.get('scale_max', 2.0)
         primitive_type = str(config.get('primitive_type', 'beta' if beta is not None else 'gaussian')).lower()
         beta_gamma_init = config.get('beta_gamma_init', 3.5)
+        img_radius_clip = config.get('img_radius_clip', 1.0 if primitive_type == "beta" else 3.0)
 
         # Stage 0: ParameterTransform
         covars, _max_scales = parameter_transform_fwd(
@@ -103,7 +116,7 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
 
         # Stage 1: WorldToImageProjection
         means2d, cov2d_3x3, radii = world_to_image_projection_fwd(
-            means, covars, viewmats, Ks, img_dim1, img_dim0, eps_blur
+            means, covars, viewmats, Ks, img_dim1, img_dim0, eps_blur, img_radius_clip
         )
 
         # Stage 2: ConicsMu

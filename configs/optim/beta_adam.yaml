@@ -1,0 +1,11 @@
+# Adam settings tuned for Beta primitives: increase lr for raw beta param.
+lr_means: 0.0002
+lr_quats: 0.001
+lr_scale_ori: 0.005
+lr_opacity: 0.01
+# Make beta updates more aggressive than default
+lr_beta: 0.01
+
+beta1: 0.9
+beta2: 0.999
+eps: 1.0e-15

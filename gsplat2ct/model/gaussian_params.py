@@ -11,6 +11,11 @@ handles all activations.
 Scale activation in our kernel:
     activated_scale = scale_min + (scale_max - scale_min) * sigmoid(scale_ori)
     => scale_ori = logit((target_scale - scale_min) / (scale_max - scale_min))
+
+The kernel expects ``scale_min`` / ``scale_max`` in world units.  Hydra
+configs expose ``scale_min_relative`` / ``scale_max_relative`` as fractions
+of ``max(scanner.sVoxel)``; training and validation scripts resolve them
+before calling this class or any CUDA operator.
 """
 
 import os
@@ -20,6 +25,7 @@ import numpy as np
 import torch
 
 from gsplat2ct.ops.data import Params
+from .opacity import inverse_opacity_activation
 
 
 class _ParamWrapper:
@@ -36,7 +42,7 @@ class GaussianParams:
         means      (N, 3)  world-space centres
         quats      (N, 4)  unit quaternions (w, x, y, z)
         scale_ori  (N, 3)  raw scale values (pre-sigmoid)
-        opacity    (N,)    raw opacity values (non-negative, no activation)
+        opacity    (N,)    raw opacity values (pre-softplus)
 
     Args:
         means: Centre positions.
@@ -105,6 +111,7 @@ class GaussianParams:
         The ``.npy`` file is expected to have shape ``(N, >=4)`` where the
         first three columns are xyz and the fourth is opacity.
 
+        ``scale_min`` and ``scale_max`` are absolute world-space bounds.
         Initial per-Gaussian scale is derived from nearest-neighbour
         distances, then mapped to raw ``scale_ori`` via the inverse of the
         kernel's sigmoid activation so that the *activated* scale matches the
@@ -140,7 +147,7 @@ class GaussianParams:
         quats = torch.zeros((n_points, 4), device=dev)
         quats[:, 0] = 1.0
 
-        opacity = opa_vals.to(dev)
+        opacity = inverse_opacity_activation(opa_vals.to(dev))
         beta = None
         if str(primitive_type).lower() == "beta":
             beta = torch.zeros((n_points,), dtype=xyz_dev.dtype, device=dev)
@@ -181,6 +188,8 @@ class GaussianParams:
 
         Args:
             points: Array/tensor with columns ``(x, y, z, opacity, ...)``.
+            scale_min: Absolute world-space lower scale bound.
+            scale_max: Absolute world-space upper scale bound.
         """
         dev = torch.device(device)
         if isinstance(points, np.ndarray):
@@ -211,7 +220,7 @@ class GaussianParams:
 
         quats = torch.zeros((n_points, 4), device=dev)
         quats[:, 0] = 1.0
-        opacity = opa_vals.to(dev)
+        opacity = inverse_opacity_activation(opa_vals.to(dev))
         beta = None
         if str(primitive_type).lower() == "beta":
             beta = torch.zeros((n_points,), dtype=xyz_dev.dtype, device=dev)
@@ -290,6 +299,7 @@ class GaussianParams:
                 "quats": self.quats.detach().cpu(),
                 "scale_ori": self.scale_ori.detach().cpu(),
                 "opacity": self.opacity.detach().cpu(),
+                "opacity_activation": "softplus",
                 "beta": None if self.beta is None else self.beta.detach().cpu(),
                 "primitive_type": self.primitive_type,
                 "beta_activation": "scaled_exp",
@@ -303,6 +313,13 @@ class GaussianParams:
     def load(cls, path: str, device: str = "cuda") -> Tuple["GaussianParams", int]:
         """Restore parameters from a ``.pt`` checkpoint."""
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        opacity_activation = ckpt.get("opacity_activation", None)
+        if str(opacity_activation).lower() != "softplus":
+            raise ValueError(
+                "Checkpoint must store raw opacity with "
+                "opacity_activation='softplus'."
+            )
+
         gp = cls(
             means=ckpt["means"],
             quats=ckpt["quats"],

@@ -1,0 +1,36 @@
+# Playground profile for quick Beta-primitive experiments with higher learning rate.
+defaults:
+  - base
+  - model: beta
+  - trainer: r2gaussian
+  - optim: r2gaussian_adam
+  - schedule: r2gaussian_exp
+  - exp: simple_beta
+  - init: playground_file
+  - strategy: none
+  - vis: r2gaussian
+  - _self_
+
+optim:
+  lr_means: 0.01
+  lr_quats: 0.05
+  lr_scale_ori: 0.1
+  lr_opacity: 0.01
+  lr_beta: 0.1
+
+trainer:
+  max_steps: 101
+  eval_interval: 5
+  save_steps: []
+
+model:
+  # Gaussian playground uses 0.2; Beta uses 3x to match support size.
+  init_scale_multiplier: 0.2
+  beta_gamma_init: 3.5
+
+exp:
+  result_dir: "output/simple_beta_beta"
+
+vis:
+  save_projection_comparison: true
+  save_volume_comparison: true

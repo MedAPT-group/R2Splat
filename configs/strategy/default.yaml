@@ -4,20 +4,25 @@ type: grad2d_based_adc
 # CUDA absgrad for densification statistics.
 absgrad: true
 
+# R2Gaussian's CUDA backward multiplies pixel-center gradients by W/2 and H/2
+# before Python densification sees grad_means2D. Our CUDA returns pixel-center
+# gradients, so keep this true for both Gaussian and beta primitives.
+scale_grad_by_image: true
+
 refine_start_iter: 500
 refine_stop_iter: 30000
 refine_every: 200
 
-# Prune Gaussians whose |opacity| is below this threshold.
+# Prune Gaussians whose activated opacity is below this threshold.
 prune_opa_abs: 1.0e-6
 
 # Grow criterion based on 2D mean gradient magnitude (either v_means2d_abs or |v_means2d|).
 grow_grad2d: 5.0e-4
 
-# Scale threshold for split-vs-duplicate, expressed as a RATIO of world scale.
-# Runtime conversion (when bbox is available):
-#   abs_threshold = grow_scale3d * max(bbox_extent_xyz)
-# where bbox_extent_xyz = bbox_max - bbox_min.
+# Scale threshold for split-vs-duplicate, expressed as a fraction of
+# max(scanner.sVoxel), matching R2Gaussian's volume_to_world conversion.
+# Runtime conversion:
+#   abs_threshold = grow_scale3d * max(scanner.sVoxel)
 # Then:
 #   scale_3d = max(activated_scales)
 #   scale_3d > abs_threshold  -> split
