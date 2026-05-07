@@ -28,3 +28,17 @@ SWEEP_ID=<entity/project/sweep_id> sbatch sweep/beta_adc_quick/sweep.sh
 The template uses `trainer.max_steps=15001` so ADC behavior is visible without
 paying for full 30001-step runs. After the promising region is clear, increase
 `trainer.max_steps` and narrow the sampled values.
+
+## Beta Scale ADC
+
+The main sweep for the 0_chest_cone_25_views Beta experiments is:
+
+```bash
+cd /home/chengzyi/myterminus/code/r2splat-r2beta
+wandb sweep sweep/beta_scale_adc/sweep_beta_scale_adc.yaml
+SWEEP_ID=<entity/project/sweep_id> sbatch sweep/beta_scale_adc/sweep.sh
+```
+
+This sweep keeps `strategy.absgrad=true` and focuses on the largest Gaussian to
+Beta changes: activated scale bounds, init scale multiplier, beta gamma, and
+grad2d ADC thresholds. It also samples a few discrete epsilon values.

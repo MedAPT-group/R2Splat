@@ -2,9 +2,8 @@
 
 global_scale: 1.0
 init_opa_scale: 1.0
-# Beta support is compact.  A scale about 3x the Gaussian scale makes its
-# support comparable to the Gaussian radius_clip=3 footprint.
-init_scale_multiplier: 3.0
+# Sweep-tuned Beta support scale.
+init_scale_multiplier: 3.5
 
 primitive_type: beta
 beta_gamma_init: 3.5

@@ -17,10 +17,9 @@ refine_every: 100
 # Prune opacity threshold (leave similar to r2gaussian)
 prune_opa_abs: 1.0e-5
 
-# Grow (split) criteria.  Beta activated scale represents compact support and
-# is configured around 3x Gaussian sigma, so use a 3x split threshold.
-grow_grad2d: 5.0e-4
-grow_scale3d: 0.30
+# Sweep-tuned grow (split) criteria for Beta primitives.
+grow_grad2d: 2.5e-4
+grow_scale3d: 0.20
 
 # Limits
 min_remaining: 100
@@ -28,6 +27,3 @@ max_gaussians: 500000
 
 # Split behavior: child_scale = parent_scale / split_scales_div
 split_scales_div: 1.6
-
-# Notes: raising `grow_scale3d` makes the algorithm require a larger
-# projected/world scale before allowing a split (more conservative).

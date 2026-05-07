@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # Submit example:
-# sbatch --time=12:00:00 --mem-per-cpu=8000M -w hardin01 --ntasks=8 --gres=gpu:4 scripts/train_all_slurm.py --gpus 4
+# sbatch --time=12:00:00 --mem-per-cpu=8000M --ntasks=8 --gres=gpu:4 scripts/train_all_slurm.py --gpus 4
 
 import argparse
+import json
 import os
 import queue
 import shlex
@@ -12,7 +13,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 DEFAULT_SUBDIRS = [
@@ -20,6 +21,14 @@ DEFAULT_SUBDIRS = [
     "cone_ntrain_25_angle_360",
     "cone_ntrain_50_angle_360",
     "cone_ntrain_75_angle_360",
+]
+
+DEFAULT_FINAL_ONLY_OVERRIDES = [
+    "trainer.eval_at_start=false",
+    "trainer.eval_interval=0",
+    "trainer.eval_at_end=true",
+    "vis.save_projection_comparison=false",
+    "vis.save_volume_comparison=false",
 ]
 
 
@@ -47,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset-root",
-        default="~/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset",
+        default="~/myterminus/data/3DGS2CT/preprocessed/synthetic_dataset",
         help="Root directory containing cone_ntrain_* subsets.",
     )
     parser.add_argument(
@@ -60,6 +69,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--samples",
+        nargs="+",
+        default=[],
+        help=(
+            "Optional sample directory names to run inside each selected --subdirs entry. "
+            "Example: --subdirs cone_ntrain_25_angle_360 --samples 0_chest_cone 2_teapot_cone"
+        ),
+    )
+    parser.add_argument(
+        "--sample-spec",
+        action="append",
+        default=[],
+        metavar="SUBDIR:SAMPLE[,SAMPLE...]",
+        help=(
+            "Exact subset/sample selection. May be repeated. "
+            "Example: --sample-spec cone_ntrain_25_angle_360:0_chest_cone,2_teapot_cone. "
+            "When provided, this overrides --subdirs/--samples discovery."
+        ),
+    )
+    parser.add_argument(
         "--gpus",
         type=int,
         default=1,
@@ -67,17 +96,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config-name",
-        default="r2gaussian_train",
+        default="r2beta_train",
         help="Hydra config name passed to scripts.train.",
     )
     parser.add_argument(
         "--result-root",
-        default="output/train_all",
+        default="output/train_all_r2beta",
         help="Parent directory for all per-sample result folders.",
     )
     parser.add_argument(
         "--logs-root",
-        default="logs/train_all_slurm",
+        default="logs/train_all_r2beta_slurm",
         help="Parent directory for per-sample launcher logs.",
     )
     parser.add_argument(
@@ -90,7 +119,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--conda-env-name",
-        default=os.environ.get("CONDA_ENV_NAME", "gsplat2"),
+        default=os.environ.get("CONDA_ENV_NAME", "r2splat-r2beta"),
         help="Conda environment name to activate.",
     )
     parser.add_argument(
@@ -122,6 +151,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip sample if output folder already exists and is non-empty.",
     )
     parser.add_argument(
+        "--keep-config-eval",
+        action="store_true",
+        help="Do not inject final-only eval overrides; use the selected config's eval schedule.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would run without actually launching training.",
@@ -140,14 +174,94 @@ def _strip_remainder_marker(overrides: Sequence[str]) -> List[str]:
     return list(overrides)
 
 
-def discover_sample_jobs(dataset_root: Path, subdirs: Sequence[str]) -> List[SampleJob]:
+def _append_unique(items: List[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def parse_sample_specs(specs: Sequence[str]) -> Dict[str, List[str]]:
+    parsed: Dict[str, List[str]] = {}
+    for raw_spec in specs:
+        raw_spec = raw_spec.strip()
+        if not raw_spec:
+            continue
+
+        if ":" in raw_spec:
+            subset_name, sample_part = raw_spec.split(":", 1)
+        elif "/" in raw_spec:
+            subset_name, sample_part = raw_spec.split("/", 1)
+        else:
+            raise ValueError(
+                "--sample-spec must look like SUBDIR:SAMPLE[,SAMPLE...] "
+                f"or SUBDIR/SAMPLE, got: {raw_spec}"
+            )
+
+        subset_name = subset_name.strip()
+        sample_names = [sample.strip() for sample in sample_part.split(",") if sample.strip()]
+        if not subset_name or not sample_names:
+            raise ValueError(f"Invalid --sample-spec: {raw_spec}")
+
+        subset_samples = parsed.setdefault(subset_name, [])
+        for sample_name in sample_names:
+            _append_unique(subset_samples, sample_name)
+
+    return parsed
+
+
+def _build_exact_jobs(dataset_root: Path, spec_map: Dict[str, List[str]]) -> List[SampleJob]:
     jobs: List[SampleJob] = []
+    missing: List[Path] = []
+    for subset_name, sample_names in spec_map.items():
+        subset_dir = dataset_root / subset_name
+        if not subset_dir.is_dir():
+            raise FileNotFoundError(f"Subset directory not found: {subset_dir}")
+
+        for sample_name in sample_names:
+            sample_dir = subset_dir / sample_name
+            if not sample_dir.is_dir():
+                missing.append(sample_dir)
+                continue
+            jobs.append(SampleJob(subset_name=subset_name, sample_name=sample_name, sample_dir=sample_dir))
+
+    if missing:
+        missing_text = "\n".join(f"  - {path}" for path in missing)
+        raise FileNotFoundError(f"Sample directories not found:\n{missing_text}")
+    return jobs
+
+
+def discover_sample_jobs(
+    dataset_root: Path,
+    subdirs: Sequence[str],
+    *,
+    samples: Sequence[str] = (),
+    sample_specs: Sequence[str] = (),
+) -> List[SampleJob]:
+    spec_map = parse_sample_specs(sample_specs)
+    if spec_map:
+        return _build_exact_jobs(dataset_root, spec_map)
+
+    jobs: List[SampleJob] = []
+    sample_filter = list(dict.fromkeys(samples))
     for sub in subdirs:
         subset_dir = dataset_root / sub
         if not subset_dir.is_dir():
             raise FileNotFoundError(f"Subset directory not found: {subset_dir}")
 
-        sample_dirs = sorted([p for p in subset_dir.iterdir() if p.is_dir()])
+        if sample_filter:
+            sample_dirs = []
+            missing = []
+            for sample_name in sample_filter:
+                sample_dir = subset_dir / sample_name
+                if sample_dir.is_dir():
+                    sample_dirs.append(sample_dir)
+                else:
+                    missing.append(sample_dir)
+            if missing:
+                missing_text = "\n".join(f"  - {path}" for path in missing)
+                raise FileNotFoundError(f"Sample directories not found:\n{missing_text}")
+        else:
+            sample_dirs = sorted([p for p in subset_dir.iterdir() if p.is_dir()])
+
         if not sample_dirs:
             raise RuntimeError(f"No sample directories found under: {subset_dir}")
 
@@ -190,6 +304,34 @@ def should_skip_output(subset_result_dir: Path, sample_name: str) -> bool:
             return True
 
     return False
+
+
+def find_latest_run_dir(subset_result_dir: Path, sample_name: str) -> Optional[Path]:
+    candidates: List[Path] = []
+
+    legacy_dir = subset_result_dir / sample_name
+    if legacy_dir.is_dir() and any(legacy_dir.iterdir()):
+        candidates.append(legacy_dir)
+
+    for candidate in subset_result_dir.glob(f"*_{sample_name}"):
+        if candidate.is_dir() and any(candidate.iterdir()):
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def load_final_metrics(run_dir: Optional[Path]) -> Dict[str, Any]:
+    if run_dir is None:
+        return {}
+
+    metrics_path = run_dir / "metrics_final.json"
+    if not metrics_path.is_file():
+        return {}
+
+    with open(metrics_path, "r", encoding="utf-8") as fin:
+        return json.load(fin)
 
 
 def build_worker_script(
@@ -277,6 +419,8 @@ def main() -> None:
     activate_env_script = Path(args.activate_env_script).expanduser().resolve()
     conda_exe = Path(args.conda_exe).expanduser().resolve()
     hydra_overrides = _strip_remainder_marker(args.hydra_overrides)
+    final_only_overrides = [] if args.keep_config_eval else DEFAULT_FINAL_ONLY_OVERRIDES
+    train_overrides = final_only_overrides + hydra_overrides
 
     if not activate_env_script.is_file():
         raise FileNotFoundError(f"activate script not found: {activate_env_script}")
@@ -284,7 +428,12 @@ def main() -> None:
         raise FileNotFoundError(f"conda executable not found: {conda_exe}")
 
     gpu_slots = resolve_gpu_slots(args.gpus)
-    jobs = discover_sample_jobs(dataset_root, args.subdirs)
+    jobs = discover_sample_jobs(
+        dataset_root,
+        args.subdirs,
+        samples=args.samples,
+        sample_specs=args.sample_spec,
+    )
     if not jobs:
         raise RuntimeError("No jobs found.")
 
@@ -317,10 +466,14 @@ def main() -> None:
         for idx, job in enumerate(filtered_jobs, start=1):
             print(f"  {idx:03d}. {job.subset_name}/{job.sample_name} -> {job.sample_dir}")
         print(f"GPU slots: {gpu_slots}")
-        print(f"Hydra overrides: {hydra_overrides}")
+        print(f"Sample filter: {args.samples or '<all>'}")
+        print(f"Sample specs: {args.sample_spec or '<none>'}")
+        print(f"Hydra overrides: {train_overrides}")
         return
 
     print(f"Dataset root: {dataset_root}")
+    print(f"Sample filter: {args.samples or '<all>'}")
+    print(f"Sample specs: {args.sample_spec or '<none>'}")
     print(f"Total samples: {len(filtered_jobs)}")
     print(f"GPU workers: {len(gpu_slots)} -> {gpu_slots}")
     print(f"Result root: {result_root}")
@@ -332,7 +485,7 @@ def main() -> None:
         job_queue.put(job)
 
     summary_lock = threading.Lock()
-    succeeded: List[Tuple[SampleJob, Path, float]] = []
+    succeeded: List[Tuple[SampleJob, Path, float, Optional[Path], Dict[str, Any]]] = []
     failed: List[Tuple[SampleJob, Path, int, float]] = []
 
     def worker(gpu_slot_idx: int, gpu_id: str) -> None:
@@ -357,8 +510,8 @@ def main() -> None:
                 args.config_name,
                 f"exp.data_dir={str(job.sample_dir)}",
                 f"exp.result_dir={str(out_dir)}",
-                "trainer.device=cuda",
-            ] + hydra_overrides
+                "trainer.device=cuda:0",
+            ] + train_overrides
 
             script = build_worker_script(
                 repo_root=repo_root,
@@ -385,9 +538,19 @@ def main() -> None:
 
             elapsed = time.time() - start
             if proc.returncode == 0:
-                print(f"[done ][gpu {gpu_id}] {sample_key} in {elapsed/60.0:.1f} min")
+                run_dir = find_latest_run_dir(result_root / job.subset_name, job.sample_name)
+                metrics = load_final_metrics(run_dir)
+                metric_text = ""
+                final_metrics = metrics.get("final_metrics", {})
+                vol_psnr = final_metrics.get("vol_metrics/psnr")
+                img_psnr = final_metrics.get("img_metrics/psnr")
+                if vol_psnr is not None:
+                    metric_text = f", vol_psnr={float(vol_psnr):.2f}"
+                elif img_psnr is not None:
+                    metric_text = f", img_psnr={float(img_psnr):.2f}"
+                print(f"[done ][gpu {gpu_id}] {sample_key} in {elapsed/60.0:.1f} min{metric_text}")
                 with summary_lock:
-                    succeeded.append((job, log_file, elapsed))
+                    succeeded.append((job, log_file, elapsed, run_dir, metrics))
             else:
                 print(
                     f"[fail ][gpu {gpu_id}] {sample_key} (code={proc.returncode}) in {elapsed/60.0:.1f} min, log={log_file}"
@@ -415,6 +578,48 @@ def main() -> None:
     print(f"Failed: {len(failed)}")
     print(f"Total wall time: {total_elapsed/3600.0:.2f} h")
     print(f"Logs directory: {logs_run_dir}")
+
+    summary = {
+        "dataset_root": str(dataset_root),
+        "config_name": args.config_name,
+        "result_root": str(result_root),
+        "logs_dir": str(logs_run_dir),
+        "subdirs": list(args.subdirs),
+        "sample_filter": list(args.samples),
+        "sample_specs": list(args.sample_spec),
+        "wandb_enabled": bool(args.wandb),
+        "wandb_group": wandb_group,
+        "gpu_slots": gpu_slots,
+        "hydra_overrides": train_overrides,
+        "total_wall_time_sec": total_elapsed,
+        "succeeded": [
+            {
+                "subset": job.subset_name,
+                "sample": job.sample_name,
+                "sample_dir": str(job.sample_dir),
+                "log": str(log_path),
+                "launcher_elapsed_sec": elapsed,
+                "run_dir": str(run_dir) if run_dir is not None else None,
+                "metrics": metrics,
+            }
+            for job, log_path, elapsed, run_dir, metrics in succeeded
+        ],
+        "failed": [
+            {
+                "subset": job.subset_name,
+                "sample": job.sample_name,
+                "sample_dir": str(job.sample_dir),
+                "log": str(log_path),
+                "exit_code": code,
+                "launcher_elapsed_sec": elapsed,
+            }
+            for job, log_path, code, elapsed in failed
+        ],
+    }
+    summary_path = logs_run_dir / "train_all_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as fout:
+        json.dump(summary, fout, indent=2)
+    print(f"Summary JSON: {summary_path}")
 
     if failed:
         print("Failed jobs:")

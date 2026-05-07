@@ -7,9 +7,11 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,6 +69,11 @@ def _maybe_init_wandb(cfg: DictConfig) -> None:
             tag.strip() for tag in os.environ["WANDB_TAGS"].split(",") if tag.strip()
         ]
     wandb.init(**init_kwargs)
+
+
+def set_cuda_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.set_device(0 if device.index is None else device.index)
 
 
 def seed_everything(
@@ -271,11 +278,11 @@ def build_optimizer(cfg: DictConfig, params: Params) -> GS3DCTAdamOptimizer:
 
 
 def train(cfg: DictConfig) -> None:
+    train_start_time = time.time()
     _maybe_init_wandb(cfg)
 
     device = torch.device(cfg.trainer.device if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        torch.cuda.set_device(device)
+    set_cuda_device(device)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_result_dir = cfg.exp.result_dir
     parent_dir = os.path.dirname(base_result_dir)
@@ -345,8 +352,7 @@ def train(cfg: DictConfig) -> None:
         )
         if init_result.coarse_volume_wdh is not None:
             print(f"   Coarse volume reconstructed: {tuple(init_result.coarse_volume_wdh.shape)}")
-        if device.type == "cuda":
-            torch.cuda.set_device(device)
+        set_cuda_device(device)
         gp = GaussianParams.from_points(
             init_result.sampled_points_n4,
             scale_min=scale_min_world,
@@ -434,20 +440,23 @@ def train(cfg: DictConfig) -> None:
     perm_cursor = 0
     progress = tqdm(range(max_steps), desc="Training")
 
-    _run_eval(
-        params,
-        cfg,
-        evalset,
-        vol_gt,
-        bbox,
-        volume_shape_wdh,
-        device,
-        vis_dir,
-        step=0,
-        scale_min_world=scale_min_world,
-        scale_max_world=scale_max_world,
-    )
+    if bool(getattr(cfg.trainer, "eval_at_start", True)):
+        _run_eval(
+            params,
+            cfg,
+            evalset,
+            vol_gt,
+            bbox,
+            volume_shape_wdh,
+            device,
+            vis_dir,
+            step=0,
+            scale_min_world=scale_min_world,
+            scale_max_world=scale_max_world,
+        )
 
+    train_loop_start_time = time.time()
+    last_train_metrics: Dict[str, float] = {}
     for step in progress:
         scheduler.step(step, max_steps)
 
@@ -502,6 +511,14 @@ def train(cfg: DictConfig) -> None:
         fwd, grad = operator.forward_backward1(params, data_obj, op_config)
         optimizer.add_grad(grad)
         loss_total, loss_img, loss_l1, loss_dssim, loss_tv = _extract_loss_values(fwd)
+        last_train_metrics = {
+            "train/loss_total": loss_total,
+            "train/loss_image": loss_img,
+            "train/loss_l1": loss_l1,
+            "train/loss_dssim": loss_dssim,
+            "train/loss_tv": loss_tv,
+            "train/num_gaussians": float(gp.num_gaussians),
+        }
 
         v_means2d = grad.get_aux("v_means2d")
         v_means2d_abs = grad.get_aux("v_means2d_abs")
@@ -553,6 +570,7 @@ def train(cfg: DictConfig) -> None:
         if not skip_optimizer_update:
             optimizer.step()
         optimizer.zero_grad()
+        last_train_metrics["train/num_gaussians"] = float(gp.num_gaussians)
 
         progress.set_postfix(
             total=f"{loss_total:.4f}",
@@ -568,21 +586,12 @@ def train(cfg: DictConfig) -> None:
             import wandb  # type: ignore
 
             if wandb.run is not None:
-                wandb.log(
-                    {
-                        "train/loss_total": loss_total,
-                        "train/loss_image": loss_img,
-                        "train/loss_l1": loss_l1,
-                        "train/loss_dssim": loss_dssim,
-                        "train/loss_tv": loss_tv,
-                        "train/num_gaussians": float(gp.num_gaussians),
-                    },
-                    step=step,
-                )
+                wandb.log(last_train_metrics, step=step)
         except ImportError:
             pass
 
-        if step > 0 and step % int(cfg.trainer.eval_interval) == 0:
+        eval_interval = int(getattr(cfg.trainer, "eval_interval", 0))
+        if eval_interval > 0 and step > 0 and step % eval_interval == 0:
             _run_eval(
                 params,
                 cfg,
@@ -602,8 +611,68 @@ def train(cfg: DictConfig) -> None:
             gp.save(os.path.join(ckpt_dir, f"ckpt_{step}.pt"), step=step)
             print(f"\n   Checkpoint saved at step {step}")
 
+    train_loop_elapsed_sec = time.time() - train_loop_start_time
+    final_step = max(0, max_steps - 1)
     gp.update_from_params(params)
-    gp.save(os.path.join(ckpt_dir, "ckpt_final.pt"), step=max_steps - 1)
+    gp.save(os.path.join(ckpt_dir, "ckpt_final.pt"), step=final_step)
+
+    final_metrics: Dict[str, float] = {}
+    final_eval_elapsed_sec = 0.0
+    if bool(getattr(cfg.trainer, "eval_at_end", False)):
+        eval_start_time = time.time()
+        final_metrics = _run_eval(
+            params,
+            cfg,
+            evalset,
+            vol_gt,
+            bbox,
+            volume_shape_wdh,
+            device,
+            vis_dir,
+            step=final_step,
+            scale_min_world=scale_min_world,
+            scale_max_world=scale_max_world,
+        )
+        final_eval_elapsed_sec = time.time() - eval_start_time
+
+    total_elapsed_sec = time.time() - train_start_time
+    metrics_report = {
+        "result_dir": result_dir,
+        "data_dir": cfg.exp.data_dir,
+        "checkpoint": os.path.join(ckpt_dir, "ckpt_final.pt"),
+        "max_steps": max_steps,
+        "final_step": final_step,
+        "num_primitives": gp.num_gaussians,
+        "timing": {
+            "setup_train_eval_sec": total_elapsed_sec,
+            "train_loop_sec": train_loop_elapsed_sec,
+            "final_eval_sec": final_eval_elapsed_sec,
+        },
+        "last_train_metrics": last_train_metrics,
+        "final_metrics": final_metrics,
+    }
+    metrics_path = os.path.join(result_dir, "metrics_final.json")
+    with open(metrics_path, "w", encoding="utf-8") as fout:
+        json.dump(metrics_report, fout, indent=2)
+
+    try:
+        import wandb  # type: ignore
+
+        if wandb.run is not None:
+            wandb_payload = {
+                "time/setup_train_eval_sec": total_elapsed_sec,
+                "time/train_loop_sec": train_loop_elapsed_sec,
+                "time/final_eval_sec": final_eval_elapsed_sec,
+                "final/num_primitives": float(gp.num_gaussians),
+            }
+            wandb_payload.update({f"final/{k}": v for k, v in final_metrics.items()})
+            wandb.log(wandb_payload, step=final_step)
+            for key, value in wandb_payload.items():
+                wandb.run.summary[key] = value
+    except ImportError:
+        pass
+
+    print(f"\nFinal metrics saved to: {metrics_path}")
     print(f"\nTraining complete. Results in: {result_dir}")
 
 
@@ -621,7 +690,7 @@ def _run_eval(
     *,
     scale_min_world: float,
     scale_max_world: float,
-) -> None:
+) -> Dict[str, float]:
     log_dict: Dict[str, float] = {}
 
     proj_eval = ProjectionEvaluator(
@@ -691,6 +760,8 @@ def _run_eval(
             wandb.log(log_dict, step=step)
     except ImportError:
         pass
+
+    return log_dict
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="default")

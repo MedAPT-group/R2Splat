@@ -35,5 +35,7 @@ img_radius_clip: 3.0
 beta_img_radius_clip: 1.0
 
 # Evaluation
+eval_at_start: true
 eval_interval: 1000
+eval_at_end: false
 ssim_window: 11

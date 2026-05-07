@@ -1,0 +1,73 @@
+entity: 810364379denveryi-eth-zurich
+project: r2splat-r2beta-beta-scale-adc
+program: scripts/train.py
+method: random
+run_cap: 625
+
+metric:
+  name: vol/psnr
+  goal: maximize
+
+parameters:
+  exp.data_dir:
+    value: /home/chengzyi/myterminus/data/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone
+  exp.result_dir:
+    value: output/sweep_beta_scale_adc
+  random.seed:
+    value: 20260506
+  trainer.max_steps:
+    value: 30001
+  trainer.eval_interval:
+    value: 1000
+  vis.save_projection_comparison:
+    value: false
+  vis.save_volume_comparison:
+    value: false
+
+  # Main axis: Beta support and shape.
+  model.init_scale_multiplier:
+    values: [2.5, 3.0, 3.5]
+  model.scale_min_relative:
+    values: [0.00025, 0.00050, 0.00100]
+  model.scale_max_relative:
+    values: [0.25, 0.50, 1.00]
+  model.beta_gamma_init:
+    values: [3.0, 3.5, 4.0]
+
+  # Main axis: grad2d-based ADC. Keep absgrad fixed for this sweep because the
+  # latest quick runs were all on absgrad=true; no-absgrad needs a different
+  # grow_grad2d scale and should be isolated in a follow-up sweep.
+  strategy.absgrad:
+    value: true
+  strategy.grow_grad2d:
+    values: [0.00025, 0.0004, 0.0005, 0.0007]
+  strategy.grow_scale3d:
+    values: [0.15, 0.20, 0.30]
+  strategy.split_scales_div:
+    values: [1.2, 1.6, 2.0]
+
+  # Optimizer knobs most directly tied to scale/gamma adaptation.
+  optim.lr_scale_ori:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 5.0e-2
+  optim.lr_beta:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 5.0e-2
+
+  # Small numerical knobs: discrete values only, to avoid wasting runs in a
+  # continuous range where differences are usually not smooth.
+  trainer.eps_blur:
+    values: [1.0e-6, 1.0e-8, 1.0e-10]
+  trainer.eps3d:
+    values: [1.0e-6, 1.0e-8, 1.0e-10]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - scripts.train
+  - --config-name
+  - 0_chest_cone_25_views_beta
+  - ${args_no_hyphens}

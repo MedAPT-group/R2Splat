@@ -11,13 +11,9 @@ defaults:
   - vis: r2gaussian
   - _self_
 
-# Chest-cone overrides (tighter beta training / densification than generic r2beta).
-model:
-  # NN-based init scale × 3 so Beta footprint matches Gaussian-like visibility at step 0.
-  init_scale_multiplier: 3.0
-
-optim:
-  lr_beta: 0.005
+trainer:
+  eps_blur: 1.0e-6
+  eps3d: 1.0e-6
 
 exp:
   result_dir: "output/0_chest_cone_25_views_beta"
