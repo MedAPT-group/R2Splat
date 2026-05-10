@@ -180,7 +180,7 @@ __global__ void voxelize_to_voxels_bwd_kernel(
                 vis = __expf(-sigma);
                 const S alpha = opac * vis;
                 
-                if (sigma < static_cast<S>(0) || fabsf(alpha) < static_cast<S>(1e-5)) {
+                if (sigma < static_cast<S>(0) || fabsf(alpha) < static_cast<S>(1e-6)) {
                     valid = false;
                 }
             }

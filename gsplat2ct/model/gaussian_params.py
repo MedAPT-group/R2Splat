@@ -136,7 +136,7 @@ class GaussianParams:
         xyz_dev = xyz.to(dev).contiguous()
 
         nn_dist = cls._compute_nn_distances(xyz_dev)
-        nn_dist = nn_dist.clamp_min(2e-4)
+        nn_dist = nn_dist.clamp_min(1e-3)
         target_scale = nn_dist * init_scale_multiplier
 
         target_scale_3 = target_scale.unsqueeze(-1).expand(-1, 3)
@@ -210,7 +210,7 @@ class GaussianParams:
         xyz_dev = xyz.to(dev).contiguous()
 
         nn_dist = cls._compute_nn_distances(xyz_dev)
-        nn_dist = nn_dist.clamp_min(2e-4)
+        nn_dist = nn_dist.clamp_min(1e-3)
         target_scale = nn_dist * float(init_scale_multiplier)
 
         target_scale_3 = target_scale.unsqueeze(-1).expand(-1, 3)
@@ -339,29 +339,60 @@ class GaussianParams:
 
     @staticmethod
     def _compute_nn_distances(xyz: torch.Tensor) -> torch.Tensor:
-        """Compute distance to nearest neighbour for each point."""
+        """Compute r2-compatible 3NN distance for each point.
+
+        r2_gaussian initializes scale from simple-knn's ``distCUDA2`` output,
+        which is the mean squared distance to the three nearest neighbours.
+        The caller expects world-space distance, so return ``sqrt(mean_sq)``.
+        """
         n = xyz.shape[0]
+        if n <= 1:
+            return torch.full((n,), 1e-3, dtype=xyz.dtype, device=xyz.device)
+
+        k = min(3, n - 1)
         batch_size = 10000
         chunks = []
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             chunk = xyz[start:end]
-            min_dists = []
+            best_sq = torch.full(
+                (end - start, k),
+                float("inf"),
+                dtype=xyz.dtype,
+                device=xyz.device,
+            )
             for t_start in range(0, n, batch_size):
                 t_end = min(t_start + batch_size, n)
                 targets = xyz[t_start:t_end]
-                d = torch.cdist(chunk, targets)
+                d_sq = torch.cdist(chunk, targets).square()
                 chunk_idx = torch.arange(
                     start, end, device=xyz.device
                 ).unsqueeze(1)
                 target_idx = torch.arange(
                     t_start, t_end, device=xyz.device
                 ).unsqueeze(0)
-                d = d.masked_fill(chunk_idx == target_idx, float("inf"))
-                min_dists.append(d.min(dim=1).values)
-            min_dists = torch.stack(min_dists, dim=1).min(dim=1).values
-            min_dists[~torch.isfinite(min_dists)] = 1e-2
-            chunks.append(min_dists)
+                d_sq = d_sq.masked_fill(chunk_idx == target_idx, float("inf"))
+                local_k = min(k, d_sq.shape[1])
+                local_best = torch.topk(
+                    d_sq, k=local_k, dim=1, largest=False
+                ).values
+                if local_k < k:
+                    pad = torch.full(
+                        (end - start, k - local_k),
+                        float("inf"),
+                        dtype=xyz.dtype,
+                        device=xyz.device,
+                    )
+                    local_best = torch.cat([local_best, pad], dim=1)
+                best_sq = torch.topk(
+                    torch.cat([best_sq, local_best], dim=1),
+                    k=k,
+                    dim=1,
+                    largest=False,
+                ).values
+            mean_sq = best_sq.mean(dim=1)
+            mean_sq[~torch.isfinite(mean_sq)] = 1e-6
+            chunks.append(torch.sqrt(mean_sq.clamp_min(1e-6)))
         return torch.cat(chunks, dim=0)
 
     @staticmethod

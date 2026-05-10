@@ -1,7 +1,0 @@
-# Experiment paths for simple-shapes cone playground dataset.
-
-data_dir: "/home/chengzyi/myterminus/data/3DGS2CT/preprocessed/simple_dataset/cone_ntrain_5_angle_360/simple_stripes_cone"
-result_dir: "output/simple_shapes_cone_playground_adam"
-
-# data_dir: "/home/chengzyi/terminus/users/xiaxiali/datasets/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone"
-# result_dir: "output/0_chest_cone_playground_adam"

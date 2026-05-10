@@ -2,7 +2,7 @@
 
 面向 CT 重建的快速一阶 3D splatting 项目。当前版本只保留 Adam 一阶优化路径，并支持两类 primitive：
 
-- `gaussian`：默认 R2Gaussian 风格高斯核。
+- `gaussian`：默认高斯核。
 - `beta`：compact-support 3D Beta density，形状激活为 `gamma = 3.5 * exp(raw_beta)`；投影路径使用 CT 线积分后的指数 `gamma + 0.5`，体素化路径直接查询 3D density。
 
 当前默认配置使用 FDK 粗重建初始化、纯 L1 图像损失，以及指数学习率衰减到初始值的 0.1 倍。
@@ -39,10 +39,10 @@ pytest -q tests/test_beta_formulas.py tests/test_beta_low_level_numeric.py tests
 
 ## 训练
 
-默认 Gaussian primitive：
+Gaussian primitive：
 
 ```bash
-python -m scripts.train --config-name default \
+python -m scripts.train --config-name gaussian \
   exp.data_dir=/path/to/ct/scene \
   exp.result_dir=output/gaussian_quick
 ```
@@ -50,22 +50,19 @@ python -m scripts.train --config-name default \
 Beta primitive：
 
 ```bash
-python -m scripts.train --config-name default model=beta \
+python -m scripts.train --config-name beta \
   exp.data_dir=/path/to/ct/scene \
   exp.result_dir=output/beta_quick
 ```
 
-选择高斯核数量控制策略：
+选择 primitive 数量控制策略：
 
 ```bash
-# 不做数量控制
-python -m scripts.train --config-name default strategy=none ...
-
 # 默认 grad2d_based_adc
-python -m scripts.train --config-name default strategy=default ...
+python -m scripts.train --config-name gaussian strategy=grad2d_based_adc ...
 
 # Kernel-Agnostic MCMC
-python -m scripts.train --config-name default strategy=ka_mcmc ...
+python -m scripts.train --config-name gaussian strategy=ka_mcmc ...
 ```
 
 ## 验证
@@ -81,4 +78,4 @@ checkpoint 会保存 primitive 类型和 beta 激活参数；验证脚本会自�
 
 ## TV loss
 
-TV loss 现在与 r2_gaussian 对齐：对 x/y/z 三个方向的 forward-difference edges 的绝对值求平均。因此默认 `lambda_tv=0.05` 可直接按 r2_gaussian 的语义理解，不再使用 `0.05 / 3` 的临时权重补偿，也不再使用平滑项。
+TV loss 对 x/y/z 三个方向的 forward-difference edges 的绝对值求平均。因此默认 `lambda_tv=0.05` 不再使用 `0.05 / 3` 的临时权重补偿，也不再使用平滑项。

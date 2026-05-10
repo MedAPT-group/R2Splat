@@ -14,14 +14,14 @@ angle_sampling_strategy: "random"
 # auto: infer radians/degrees from value range.
 angle_unit: "auto"
 
-save_steps: [4999, 9999, 19999, 29999]
+# No intermediate checkpoints by default; train.py always saves ckpt_final.pt.
+save_steps: []
 
 # Image loss settings: mean L1 + lambda_dssim * (1 - SSIM).
 lambda_l1: 1.0
 lambda_dssim: 0.25
 
-# TV regularization.
-# R2Gaussian uses lambda_tv=0.05 with TV averaged over x/y/z edge counts.
+# TV regularization averaged over x/y/z edge counts.
 lambda_tv: 0.05
 tv_vol_size: 32
 

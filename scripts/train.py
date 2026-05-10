@@ -2,7 +2,7 @@
 
 Usage:
     python -m scripts.train
-    python -m scripts.train exp=25_views strategy=default
+    python -m scripts.train --config-name gaussian exp=0_chest_cone_25_views
 """
 
 from __future__ import annotations
@@ -764,7 +764,7 @@ def _run_eval(
     return log_dict
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="default")
+@hydra.main(version_base=None, config_path="../configs", config_name="gaussian")
 def main(cfg: DictConfig) -> None:
     cfg.exp.data_dir = to_absolute_path(cfg.exp.data_dir)
     cfg.exp.result_dir = to_absolute_path(cfg.exp.result_dir)

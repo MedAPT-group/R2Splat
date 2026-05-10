@@ -1,4 +1,4 @@
-# R2Gaussian-like Adam settings.
+# Adam settings for Gaussian primitives.
 
 lr_means: 0.0002
 lr_quats: 0.001

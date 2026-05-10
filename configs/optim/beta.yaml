@@ -1,4 +1,5 @@
-# Adam settings tuned for Beta primitives.
+# Adam settings for Beta primitives.
+
 lr_means: 0.0002
 lr_quats: 0.001
 lr_scale_ori: 0.005

@@ -1,0 +1,19 @@
+enabled: true
+type: grad2d_based_adc
+
+absgrad: true
+scale_grad_by_image: true
+
+refine_start_iter: 500
+refine_stop_iter: 15000
+refine_every: 100
+
+prune_opa_abs: 1.0e-5
+
+grow_grad2d: 2.5e-4 # 5.0e-4 # 7.5e-4
+grow_scale3d: 0.20
+
+min_remaining: 100
+max_gaussians: 500000
+
+split_scales_div: 1.6

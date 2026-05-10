@@ -1,4 +1,3 @@
-# Evaluation visualizations.
-
+# Disable evaluation visualizations.
 save_projection_comparison: false
 save_volume_comparison: false

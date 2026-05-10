@@ -4,7 +4,7 @@ This directory contains small W&B sweep templates for parameter searches.
 
 ## Beta ADC Quick
 
-The quick beta sweep targets `0_chest_cone_25_views_beta` and focuses on the
+The quick beta sweep targets the `beta` training config and focuses on the
 parameters that currently look most coupled to beta quality:
 
 - ADC sensitivity: `strategy.absgrad`, `strategy.grow_grad2d`,
@@ -39,6 +39,6 @@ wandb sweep sweep/beta_scale_adc/sweep_beta_scale_adc.yaml
 SWEEP_ID=<entity/project/sweep_id> sbatch sweep/beta_scale_adc/sweep.sh
 ```
 
-This sweep keeps `strategy.absgrad=true` and focuses on the largest Gaussian to
-Beta changes: activated scale bounds, init scale multiplier, beta gamma, and
-grad2d ADC thresholds. It also samples a few discrete epsilon values.
+This sweep keeps `strategy.absgrad=true` and focuses on scale bounds, init
+scale multiplier, beta gamma, and grad2d ADC thresholds. It also samples a few
+discrete epsilon values.

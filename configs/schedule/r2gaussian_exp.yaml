@@ -1,8 +1,0 @@
-enabled: true
-
-# Exponential decay from 1.0 -> 0.1 across max_steps.
-lr:
-  type: "exp"
-  warmup_steps: 0
-  min_factor: 0.1
-

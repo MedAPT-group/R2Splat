@@ -1,0 +1,22 @@
+# Beta primitive training configuration.
+defaults:
+  - base
+  - model: beta
+  - init: default
+  - trainer: default
+  - optim: beta
+  - schedule: default
+  - strategy: grad2d_based_adc_beta
+  - vis: "off"
+  - _self_
+  - optional exp: null
+
+# Fill these from the command line, or select an experiment with:
+#   exp=0_chest_cone_25_views
+exp:
+  data_dir: ???
+  result_dir: ???
+
+trainer:
+  eps_blur: 1.0e-6
+  eps3d: 1.0e-6

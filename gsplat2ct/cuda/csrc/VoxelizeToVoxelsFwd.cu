@@ -205,7 +205,7 @@ __global__ void voxelize_to_voxels_fwd_kernel(
 
             // Numerical stability check
             // Skip if sigma is negative (invalid conic) or alpha is too small
-            if (sigma < static_cast<S>(0) || fabsf(alpha) < static_cast<S>(1e-5)) {
+            if (sigma < static_cast<S>(0) || fabsf(alpha) < static_cast<S>(1e-6)) {
                 continue;
             }
 

@@ -24,6 +24,7 @@ DEFAULT_SUBDIRS = [
 ]
 
 DEFAULT_FINAL_ONLY_OVERRIDES = [
+    "trainer.save_steps=[]",
     "trainer.eval_at_start=false",
     "trainer.eval_interval=0",
     "trainer.eval_at_end=true",
@@ -96,17 +97,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config-name",
-        default="r2beta_train",
+        default="beta",
         help="Hydra config name passed to scripts.train.",
     )
     parser.add_argument(
         "--result-root",
-        default="output/train_all_r2beta",
+        default="output/train_all_beta",
         help="Parent directory for all per-sample result folders.",
     )
     parser.add_argument(
         "--logs-root",
-        default="logs/train_all_r2beta_slurm",
+        default="logs/train_all_beta_slurm",
         help="Parent directory for per-sample launcher logs.",
     )
     parser.add_argument(
@@ -126,7 +127,7 @@ def parse_args() -> argparse.Namespace:
         "--conda-exe",
         default=os.environ.get(
             "CONDA_EXE",
-            f"{os.environ.get('CONDA_ROOT', str(Path.home() / 'myterminus/miniconda3'))}/bin/conda",
+            f"{os.environ.get('CONDA_ROOT', str(Path.home() / 'myterminus/env/miniconda3'))}/bin/conda",
         ),
         help="Path to conda executable used for shell hook initialization.",
     )

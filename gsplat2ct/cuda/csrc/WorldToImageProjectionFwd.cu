@@ -254,7 +254,7 @@ __global__ void world_to_image_projection_fwd_kernel(
     }
 
     const S half_trace = static_cast<S>(0.5) * (a_blur + d_blur);
-    const S v1 = half_trace + sqrt(max(static_cast<S>(0.01),
+    const S v1 = half_trace + sqrt(max(static_cast<S>(0.1),
                                        half_trace * half_trace - det_blur));
     S radius = ceil(radius_clip * sqrt(v1));
 

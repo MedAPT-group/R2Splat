@@ -107,12 +107,12 @@ __global__ void world_to_volume_mapping_bwd_kernel(
     const S r1 = D1 / ry;
     const S r2 = D0 / rz;
 
-    // ---- Gradient path 1: means3d_v → means ----
-    // means3d_v[k] = (p[k] - center[k]) * r[k] + dim[k]/2
-    // d(means3d_v[k])/d(p[k]) = r[k]
-    v_means[idx * 3 + 0] = v_means3d_v[idx * 3 + 0] * r0;
-    v_means[idx * 3 + 1] = v_means3d_v[idx * 3 + 1] * r1;
-    v_means[idx * 3 + 2] = v_means3d_v[idx * 3 + 2] * r2;
+    // ---- Gradient path 1: means3d_v -> means ----
+    // Match r2_gaussian's TV/volume backward convention: the voxel-space
+    // mean gradient is scaled by dVoxel (= range / dim), not by dim / range.
+    v_means[idx * 3 + 0] = v_means3d_v[idx * 3 + 0] / r0;
+    v_means[idx * 3 + 1] = v_means3d_v[idx * 3 + 1] / r1;
+    v_means[idx * 3 + 2] = v_means3d_v[idx * 3 + 2] / r2;
 
     // ---- Recompute Sigma_v and conics for gradient path 2 ----
     const S* s = covars + idx * 6;

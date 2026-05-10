@@ -46,5 +46,5 @@ command:
   - -m
   - scripts.train
   - --config-name
-  - 0_chest_cone_25_views_beta
+  - beta
   - ${args_no_hyphens}

@@ -1,13 +1,11 @@
-# Beta primitive model. Use with `model=beta`.
+# Beta primitive model parameters.
 
 global_scale: 1.0
 init_opa_scale: 1.0
-# Sweep-tuned Beta support scale.
-init_scale_multiplier: 3.5
+init_scale_multiplier: 3.0
 
 primitive_type: beta
-beta_gamma_init: 3.5
+beta_gamma_init: 4.0
 
-# Relative fractions of max(scanner.sVoxel), matching R2Gaussian.
 scale_min_relative: 0.0005
 scale_max_relative: 0.5

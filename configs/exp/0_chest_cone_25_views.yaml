@@ -1,4 +1,3 @@
-# Experiment paths for 25-view cone-beam dataset.
-
+# Example experiment paths for the 25-view cone-beam chest sample.
 data_dir: "/home/chengzyi/myterminus/data/3DGS2CT/preprocessed/synthetic_dataset/cone_ntrain_25_angle_360/0_chest_cone"
 result_dir: "output/0_chest_cone_25_views"

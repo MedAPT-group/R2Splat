@@ -1,6 +1,0 @@
-enabled: false
-
-lr:
-  type: "constant"
-  warmup_steps: 0
-  min_factor: 1.0

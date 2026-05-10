@@ -1,0 +1,10 @@
+# Gaussian primitive model parameters.
+
+global_scale: 1.0
+init_opa_scale: 1.0
+init_scale_multiplier: 1.0
+
+primitive_type: gaussian
+
+scale_min_relative: 0.0005
+scale_max_relative: 0.5

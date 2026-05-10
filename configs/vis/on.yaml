@@ -1,0 +1,3 @@
+# Enable evaluation visualizations.
+save_projection_comparison: true
+save_volume_comparison: true
