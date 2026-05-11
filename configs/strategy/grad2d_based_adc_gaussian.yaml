@@ -11,7 +11,7 @@ refine_every: 100
 prune_opa_abs: 1.0e-5
 
 # Match r2_gaussian's densify_grad_threshold for the signed-gradient path.
-grow_grad2d: 2.0e-4
+grow_grad2d: 5.0e-4
 grow_scale3d: 0.10
 
 min_remaining: 100

@@ -10,7 +10,7 @@ refine_every: 100
 
 prune_opa_abs: 1.0e-5
 
-grow_grad2d: 2.5e-4 # 5.0e-4 # 7.5e-4
+grow_grad2d: 5.0e-4 # 2.5e-4 # 5.0e-4 # 7.5e-4
 grow_scale3d: 0.20
 
 min_remaining: 100

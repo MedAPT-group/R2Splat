@@ -35,19 +35,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Voxelize 3D Gaussians to a voxel grid");
     m.def("voxelize_to_voxels_bwd", &gsplat2ct::voxelize_to_voxels_bwd_tensor,
           "Voxelization backward pass");
+    m.def("voxelize_to_voxels_bwd_per_gaussian", &gsplat2ct::voxelize_to_voxels_bwd_per_gaussian_tensor,
+          "Voxelization per-Gaussian-tile backward pass");
     m.def("beta_voxelize_to_voxels_fwd", &gsplat2ct::beta_voxelize_to_voxels_fwd_tensor,
           "Voxelize 3D Beta primitives to a voxel grid");
     m.def("beta_voxelize_to_voxels_bwd", &gsplat2ct::beta_voxelize_to_voxels_bwd_tensor,
           "Beta voxelization backward pass");
+    m.def("beta_voxelize_to_voxels_bwd_per_gaussian", &gsplat2ct::beta_voxelize_to_voxels_bwd_per_gaussian_tensor,
+          "Beta voxelization per-Gaussian-tile backward pass");
 
     m.def("rasterize_to_pixels_fwd", &gsplat2ct::rasterize_to_pixels_fwd_tensor,
           "Projection rasterization forward pass");
     m.def("rasterize_to_pixels_bwd", &gsplat2ct::rasterize_to_pixels_bwd_tensor,
           "Projection rasterization backward pass");
+    m.def("rasterize_to_pixels_bwd_per_gaussian", &gsplat2ct::rasterize_to_pixels_bwd_per_gaussian_tensor,
+          "Projection rasterization per-Gaussian-tile backward pass");
     m.def("beta_rasterize_to_pixels_fwd", &gsplat2ct::beta_rasterize_to_pixels_fwd_tensor,
           "Beta projection rasterization forward pass");
     m.def("beta_rasterize_to_pixels_bwd", &gsplat2ct::beta_rasterize_to_pixels_bwd_tensor,
           "Beta projection rasterization backward pass");
+    m.def("beta_rasterize_to_pixels_bwd_per_gaussian", &gsplat2ct::beta_rasterize_to_pixels_bwd_per_gaussian_tensor,
+          "Beta projection rasterization per-Gaussian-tile backward pass");
 
     m.def("conics_mu_fwd", &gsplat2ct::conics_mu_fwd_tensor,
           "Conics/mu forward pass");

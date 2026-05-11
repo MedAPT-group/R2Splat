@@ -34,8 +34,8 @@
  * Step 5: 3x3 symmetric matrix inversion → conics
  *   conics = Sigma_v^{-1}
  *
- * Step 6: Radii (non-differentiable)
- *   radii[k] = ceil(radius_clip * max_scale * r[k])
+ * Step 6: Axis-aligned radii (non-differentiable)
+ *   radii[k] = ceil(radius_clip * sqrt(Sigma_v[k,k]))
  *
  * Each thread processes one Gaussian.
  *
@@ -169,11 +169,23 @@ __global__ void world_to_volume_mapping_fwd_kernel(
     out[4] = c12;
     out[5] = c22;
 
-    // ---- Step 6: Compute radii (non-differentiable) ----
-    const S ms = max_scales[idx];
-    radii[idx * 3 + 0] = static_cast<int32_t>(ceil(radius_clip * ms * r0));
-    radii[idx * 3 + 1] = static_cast<int32_t>(ceil(radius_clip * ms * r1));
-    radii[idx * 3 + 2] = static_cast<int32_t>(ceil(radius_clip * ms * r2));
+    // ---- Step 6: Compute tight axis-aligned radii (non-differentiable) ----
+    const S radius_x = ceil(radius_clip * sqrt(max(static_cast<S>(0), Sv00)));
+    const S radius_y = ceil(radius_clip * sqrt(max(static_cast<S>(0), Sv11)));
+    const S radius_z = ceil(radius_clip * sqrt(max(static_cast<S>(0), Sv22)));
+    if (!isfinite(radius_x) || !isfinite(radius_y) || !isfinite(radius_z) ||
+        radius_x <= static_cast<S>(0) ||
+        radius_y <= static_cast<S>(0) ||
+        radius_z <= static_cast<S>(0)) {
+        radii[idx * 3 + 0] = 0;
+        radii[idx * 3 + 1] = 0;
+        radii[idx * 3 + 2] = 0;
+        return;
+    }
+
+    radii[idx * 3 + 0] = static_cast<int32_t>(radius_x);
+    radii[idx * 3 + 1] = static_cast<int32_t>(radius_y);
+    radii[idx * 3 + 2] = static_cast<int32_t>(radius_z);
 }
 
 // ============================================================================

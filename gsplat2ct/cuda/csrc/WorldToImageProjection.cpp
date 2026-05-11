@@ -16,6 +16,7 @@
  * Output shapes:
  *   means2d:   [C, N, 2]  -- projected 2D centers
  *   cov2d_3x3: [C, N, 6]  -- projected 3x3 covariance (upper-tri)
+ *   radii:     [C, N, 2]  -- axis-aligned tile radii (rx, ry)
  *
  * Following gsplat2ct's pattern for tensor handling.
  *
@@ -84,7 +85,7 @@ world_to_image_projection_fwd_tensor(
     torch::Tensor cov2d_3x3 = torch::empty(
         {C, N, 6}, means.options());
     torch::Tensor radii = torch::zeros(
-        {C, N}, means.options().dtype(torch::kInt32));
+        {C, N, 2}, means.options().dtype(torch::kInt32));
 
     if (total == 0) {
         return std::make_tuple(means2d, cov2d_3x3, radii);

@@ -82,7 +82,7 @@ __global__ void world_to_image_projection_fwd_kernel(
     S radius_clip,
     S* __restrict__ means2d,           // [C*N, 2]
     S* __restrict__ cov2d_3x3,        // [C*N, 6]
-    int32_t* __restrict__ radii,       // [C*N]
+    int32_t* __restrict__ radii,       // [C*N, 2]
     uint32_t C,
     uint32_t N
 ) {
@@ -130,7 +130,8 @@ __global__ void world_to_image_projection_fwd_kernel(
         means2d[idx * 2 + 0] = static_cast<S>(0);
         means2d[idx * 2 + 1] = static_cast<S>(0);
         for (int i = 0; i < 6; ++i) cov2d_3x3[idx * 6 + i] = static_cast<S>(0);
-        radii[idx] = 0;
+        radii[idx * 2 + 0] = 0;
+        radii[idx * 2 + 1] = 0;
         return;
     }
 
@@ -241,7 +242,9 @@ __global__ void world_to_image_projection_fwd_kernel(
     out_cov[5] = C22;  // f = Sigma_tilde[2][2]
 
     // ================================================================
-    // Compute radii from 2x2 upper-left block with blur (non-differentiable)
+    // Compute axis-aligned rectangular radii from the 2D covariance with blur
+    // (non-differentiable). For q <= radius_clip^2, the exact AABB half-widths
+    // are radius_clip * sqrt(Sigma_xx) and radius_clip * sqrt(Sigma_yy).
     // Following fully_fused_projection_fwd.cu from 3DGS2CT reference
     // ================================================================
     const S a_blur = C00 + eps_blur;
@@ -249,31 +252,34 @@ __global__ void world_to_image_projection_fwd_kernel(
     const S b_off = C01;
     const S det_blur = a_blur * d_blur - b_off * b_off;
     if (det_blur <= static_cast<S>(0)) {
-        radii[idx] = 0;
+        radii[idx * 2 + 0] = 0;
+        radii[idx * 2 + 1] = 0;
         return;
     }
 
-    const S half_trace = static_cast<S>(0.5) * (a_blur + d_blur);
-    const S v1 = half_trace + sqrt(max(static_cast<S>(0.1),
-                                       half_trace * half_trace - det_blur));
-    S radius = ceil(radius_clip * sqrt(v1));
+    const S radius_x = ceil(radius_clip * sqrt(max(static_cast<S>(0), a_blur)));
+    const S radius_y = ceil(radius_clip * sqrt(max(static_cast<S>(0), d_blur)));
 
-    if (!isfinite(radius) || radius <= static_cast<S>(0)) {
-        radii[idx] = 0;
+    if (!isfinite(radius_x) || !isfinite(radius_y) ||
+        radius_x <= static_cast<S>(0) || radius_y <= static_cast<S>(0)) {
+        radii[idx * 2 + 0] = 0;
+        radii[idx * 2 + 1] = 0;
         return;
     }
 
     const S mean_x = means2d[idx * 2];
     const S mean_y = means2d[idx * 2 + 1];
-    if (mean_x + radius <= static_cast<S>(0) ||
-        mean_x - radius >= static_cast<S>(dim1) ||
-        mean_y + radius <= static_cast<S>(0) ||
-        mean_y - radius >= static_cast<S>(dim0)) {
-        radii[idx] = 0;
+    if (mean_x + radius_x <= static_cast<S>(0) ||
+        mean_x - radius_x >= static_cast<S>(dim1) ||
+        mean_y + radius_y <= static_cast<S>(0) ||
+        mean_y - radius_y >= static_cast<S>(dim0)) {
+        radii[idx * 2 + 0] = 0;
+        radii[idx * 2 + 1] = 0;
         return;
     }
 
-    radii[idx] = static_cast<int32_t>(radius);
+    radii[idx * 2 + 0] = static_cast<int32_t>(radius_x);
+    radii[idx * 2 + 1] = static_cast<int32_t>(radius_y);
 }
 
 // ============================================================================

@@ -314,8 +314,10 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
     ) -> Tuple[ForwardResult, GradResult]:
         from ..cuda._wrapper import (
             beta_rasterize_to_pixels_bwd,
+            beta_rasterize_to_pixels_bwd_per_gaussian,
             beta_rasterize_to_pixels_fwd,
             beta_voxelize_to_voxels_bwd,
+            beta_voxelize_to_voxels_bwd_per_gaussian,
             beta_voxelize_to_voxels_fwd,
             conics_mu_bwd,
             conics_mu_fwd,
@@ -326,10 +328,12 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             parameter_transform_bwd,
             parameter_transform_fwd,
             rasterize_to_pixels_bwd,
+            rasterize_to_pixels_bwd_per_gaussian,
             rasterize_to_pixels_fwd,
             volume_loss_bwd,
             volume_loss_fwd,
             voxelize_to_voxels_bwd,
+            voxelize_to_voxels_bwd_per_gaussian,
             voxelize_to_voxels_fwd,
             world_to_image_projection_bwd,
             world_to_image_projection_fwd,
@@ -483,29 +487,73 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
         grad_one = torch.ones(1, device=means.device, dtype=means.dtype)
 
         absgrad = bool(config.get("absgrad", False)) if config is not None else False
+        default_backward_mode = str(config.get("backward_mode", "pixel")).lower()
+        img_backward_mode = str(
+            config.get("img_backward_mode", default_backward_mode)
+        ).lower()
+        vol_backward_mode = str(
+            config.get("vol_backward_mode", default_backward_mode)
+        ).lower()
+        valid_backward_modes = {"pixel", "primitive"}
+        if img_backward_mode not in valid_backward_modes:
+            raise ValueError(
+                f"Unsupported img_backward_mode={img_backward_mode!r}; "
+                "expected 'pixel' or 'primitive'"
+            )
+        if vol_backward_mode not in valid_backward_modes:
+            raise ValueError(
+                f"Unsupported vol_backward_mode={vol_backward_mode!r}; "
+                "expected 'pixel' or 'primitive'"
+            )
+        img_per_primitive = img_backward_mode == "primitive"
+        vol_per_primitive = vol_backward_mode == "primitive"
         v_beta_raw = None
         if primitive_type == "beta":
-            (
-                v_means2d_abs,
-                v_means2d,
-                v_conics_2d,
-                v_opacity_rast,
-                v_mus_render,
-                v_projected_beta,
-            ) = beta_rasterize_to_pixels_bwd(
-                means2d,
-                conics_2d,
-                opacity_2d,
-                mus_render,
-                beta_2d,
-                tile_offsets_2d,
-                flatten_ids_2d,
-                v_render_img,
-                img_dim1,
-                img_dim0,
-                img_tile_size,
-                absgrad,
-            )
+            if img_per_primitive:
+                (
+                    v_means2d_abs,
+                    v_means2d,
+                    v_conics_2d,
+                    v_opacity_rast,
+                    v_mus_render,
+                    v_projected_beta,
+                ) = beta_rasterize_to_pixels_bwd_per_gaussian(
+                    means2d,
+                    conics_2d,
+                    opacity_2d,
+                    mus_render,
+                    beta_2d,
+                    tile_offsets_2d,
+                    isect_ids_2d,
+                    flatten_ids_2d,
+                    v_render_img,
+                    img_dim1,
+                    img_dim0,
+                    img_tile_size,
+                    absgrad,
+                )
+            else:
+                (
+                    v_means2d_abs,
+                    v_means2d,
+                    v_conics_2d,
+                    v_opacity_rast,
+                    v_mus_render,
+                    v_projected_beta,
+                ) = beta_rasterize_to_pixels_bwd(
+                    means2d,
+                    conics_2d,
+                    opacity_2d,
+                    mus_render,
+                    beta_2d,
+                    tile_offsets_2d,
+                    flatten_ids_2d,
+                    v_render_img,
+                    img_dim1,
+                    img_dim0,
+                    img_tile_size,
+                    absgrad,
+                )
             v_mus = v_mus_render * path_ratio.unsqueeze(0)
             v_gamma_path = (
                 v_mus_render
@@ -516,21 +564,39 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
             v_gamma_proj = v_projected_beta.sum(dim=0)
             v_beta_raw = (v_gamma_path + v_gamma_proj) * beta_act_grad
         else:
-            v_means2d_abs, v_means2d, v_conics_2d, v_opacity_rast, v_mus = (
-                rasterize_to_pixels_bwd(
-                    means2d,
-                    conics_2d,
-                    opacity_2d,
-                    mus_render,
-                    tile_offsets_2d,
-                    flatten_ids_2d,
-                    v_render_img,
-                    img_dim1,
-                    img_dim0,
-                    img_tile_size,
-                    absgrad,
+            if img_per_primitive:
+                v_means2d_abs, v_means2d, v_conics_2d, v_opacity_rast, v_mus = (
+                    rasterize_to_pixels_bwd_per_gaussian(
+                        means2d,
+                        conics_2d,
+                        opacity_2d,
+                        mus_render,
+                        tile_offsets_2d,
+                        isect_ids_2d,
+                        flatten_ids_2d,
+                        v_render_img,
+                        img_dim1,
+                        img_dim0,
+                        img_tile_size,
+                        absgrad,
+                    )
                 )
-            )
+            else:
+                v_means2d_abs, v_means2d, v_conics_2d, v_opacity_rast, v_mus = (
+                    rasterize_to_pixels_bwd(
+                        means2d,
+                        conics_2d,
+                        opacity_2d,
+                        mus_render,
+                        tile_offsets_2d,
+                        flatten_ids_2d,
+                        v_render_img,
+                        img_dim1,
+                        img_dim0,
+                        img_tile_size,
+                        absgrad,
+                    )
+                )
         v_cov2d_3x3 = conics_mu_bwd(
             cov2d_3x3, eps_blur, conics_2d, mus, v_conics_2d, v_mus
         )
@@ -547,12 +613,62 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
 
         v_render_vol = volume_loss_bwd(render_vol_4d, grad_one, lambda_tv).squeeze(0)
         if primitive_type == "beta":
-            v_means3d_v, v_conics_3d_vol, v_opacity_vol, v_gamma_vol = (
-                beta_voxelize_to_voxels_bwd(
+            if vol_per_primitive:
+                v_means3d_v, v_conics_3d_vol, v_opacity_vol, v_gamma_vol = (
+                    beta_voxelize_to_voxels_bwd_per_gaussian(
+                        means3d_v,
+                        conics_3d,
+                        opacity,
+                        gamma,
+                        tile_offsets_3d,
+                        isect_ids_3d,
+                        flatten_ids_3d,
+                        v_render_vol,
+                        vol_dim2,
+                        vol_dim1,
+                        vol_dim0,
+                        vol_tile_size,
+                    )
+                )
+            else:
+                v_means3d_v, v_conics_3d_vol, v_opacity_vol, v_gamma_vol = (
+                    beta_voxelize_to_voxels_bwd(
+                        means3d_v,
+                        conics_3d,
+                        opacity,
+                        gamma,
+                        tile_offsets_3d,
+                        flatten_ids_3d,
+                        v_render_vol,
+                        vol_dim2,
+                        vol_dim1,
+                        vol_dim0,
+                        vol_tile_size,
+                    )
+                )
+            v_beta_raw = v_beta_raw + v_gamma_vol * beta_act_grad
+        else:
+            if vol_per_primitive:
+                v_means3d_v, v_conics_3d_vol, v_opacity_vol = (
+                    voxelize_to_voxels_bwd_per_gaussian(
+                        means3d_v,
+                        conics_3d,
+                        opacity,
+                        tile_offsets_3d,
+                        isect_ids_3d,
+                        flatten_ids_3d,
+                        v_render_vol,
+                        vol_dim2,
+                        vol_dim1,
+                        vol_dim0,
+                        vol_tile_size,
+                    )
+                )
+            else:
+                v_means3d_v, v_conics_3d_vol, v_opacity_vol = voxelize_to_voxels_bwd(
                     means3d_v,
                     conics_3d,
                     opacity,
-                    gamma,
                     tile_offsets_3d,
                     flatten_ids_3d,
                     v_render_vol,
@@ -561,21 +677,6 @@ class GS3DCTLossCUDA(ForwardBackwardBase):
                     vol_dim0,
                     vol_tile_size,
                 )
-            )
-            v_beta_raw = v_beta_raw + v_gamma_vol * beta_act_grad
-        else:
-            v_means3d_v, v_conics_3d_vol, v_opacity_vol = voxelize_to_voxels_bwd(
-                means3d_v,
-                conics_3d,
-                opacity,
-                tile_offsets_3d,
-                flatten_ids_3d,
-                v_render_vol,
-                vol_dim2,
-                vol_dim1,
-                vol_dim0,
-                vol_tile_size,
-            )
         v_means_vol, v_covars_vol = world_to_volume_mapping_bwd(
             means,
             covars,

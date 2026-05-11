@@ -43,7 +43,8 @@ namespace gsplat2ct {
  * @tparam S Scalar type (float, double)
  * 
  * @param means2d 2D projected centers [C * N, 2], format: (x, y) = (dim1, dim0)
- * @param radii Gaussian radii in pixels [C * N]
+ * @param radii Gaussian radii in pixels [C * N] or rectangular radii [C * N, 2]
+ * @param radii_is_rect Whether radii stores (rx, ry) pairs instead of a scalar
  * @param tiles_per_gauss Output: number of tiles per Gaussian [C * N]
  * @param C Number of cameras
  * @param N Number of Gaussians per camera
@@ -55,10 +56,11 @@ namespace gsplat2ct {
 template <typename S>
 void launch_compute_tiles_per_gauss(
     const S* __restrict__ means2d,          // [C * N, 2]
-    const int32_t* __restrict__ radii,      // [C * N]
+    const int32_t* __restrict__ radii,      // [C * N] or [C * N, 2]
     int32_t* __restrict__ tiles_per_gauss,  // [C * N]
     uint32_t C,
     uint32_t N,
+    bool radii_is_rect,
     uint32_t tile_size,
     uint32_t n_tiles_dim1,
     uint32_t n_tiles_dim0,
@@ -83,7 +85,8 @@ void launch_compute_tiles_per_gauss(
  * @tparam S Scalar type (float, double)
  * 
  * @param means2d 2D projected centers [C * N, 2]
- * @param radii Gaussian radii in pixels [C * N]
+ * @param radii Gaussian radii in pixels [C * N] or rectangular radii [C * N, 2]
+ * @param radii_is_rect Whether radii stores (rx, ry) pairs instead of a scalar
  * @param cum_tiles_per_gauss Cumulative sum of tiles_per_gauss [C * N]
  * @param isect_ids Output: encoded (camera_id, tile_id) for sorting [n_isects]
  * @param flatten_ids Output: original Gaussian index [n_isects]
@@ -98,12 +101,13 @@ void launch_compute_tiles_per_gauss(
 template <typename S>
 void launch_generate_isect_records(
     const S* __restrict__ means2d,                   // [C * N, 2]
-    const int32_t* __restrict__ radii,               // [C * N]
+    const int32_t* __restrict__ radii,               // [C * N] or [C * N, 2]
     const int64_t* __restrict__ cum_tiles_per_gauss, // [C * N]
     int64_t* __restrict__ isect_ids,                 // [n_isects]
     int32_t* __restrict__ flatten_ids,               // [n_isects]
     uint32_t C,
     uint32_t N,
+    bool radii_is_rect,
     uint32_t tile_size,
     uint32_t n_tiles_dim1,
     uint32_t n_tiles_dim0,

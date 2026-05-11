@@ -122,6 +122,12 @@ def make_train_config(
     if scale_min_world is None or scale_max_world is None:
         raise ValueError("make_train_config expects world-space scale bounds")
 
+    def _backward_mode(name: str, value: object) -> str:
+        mode = str(value).lower()
+        if mode not in {"pixel", "primitive"}:
+            raise ValueError(f"trainer.{name} must be 'pixel' or 'primitive', got {mode!r}")
+        return mode
+
     img_h, img_w = img_shape
     vol_w, vol_d, vol_h = vol_dims
     trainer = cfg.trainer
@@ -131,6 +137,15 @@ def make_train_config(
     if primitive_type == "beta":
         radius_clip = float(getattr(trainer, "beta_radius_clip", 1.0))
         img_radius_clip = float(getattr(trainer, "beta_img_radius_clip", 1.0))
+    backward_mode = _backward_mode(
+        "backward_mode", getattr(trainer, "backward_mode", "pixel")
+    )
+    img_backward_mode = _backward_mode(
+        "img_backward_mode", getattr(trainer, "img_backward_mode", backward_mode)
+    )
+    vol_backward_mode = _backward_mode(
+        "vol_backward_mode", getattr(trainer, "vol_backward_mode", backward_mode)
+    )
 
     op_cfg = Config()
     op_cfg.set(
@@ -154,6 +169,9 @@ def make_train_config(
         primitive_type=primitive_type,
         beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
         absgrad=bool(getattr(getattr(cfg, "strategy", None), "absgrad", False)),
+        backward_mode=backward_mode,
+        img_backward_mode=img_backward_mode,
+        vol_backward_mode=vol_backward_mode,
     )
     return op_cfg
 

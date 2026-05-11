@@ -37,6 +37,12 @@ beta_radius_clip: 1.0
 # its exact compact support radius to avoid rasterizing empty tiles.
 img_radius_clip: 3.0
 beta_img_radius_clip: 1.0
+# Backward kernel choice for training: "pixel" uses one thread per output
+# pixel/voxel; "primitive" uses one warp per primitive-tile intersection.
+backward_mode: "pixel"
+# Optional per-domain overrides; inherit backward_mode when unset.
+# img_backward_mode: "pixel"
+# vol_backward_mode: "pixel"
 
 # Evaluation
 eval_at_start: true

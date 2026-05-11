@@ -1,4 +1,5 @@
 from omegaconf import OmegaConf
+import pytest
 
 from scripts.train import make_train_config
 
@@ -23,6 +24,7 @@ def _cfg(primitive_type: str):
                 "img_radius_clip": 3.0,
                 "beta_img_radius_clip": 1.0,
                 "lambda_tv": 0.05,
+                "backward_mode": "primitive",
             },
             "strategy": {"absgrad": False},
         }
@@ -57,3 +59,33 @@ def test_gaussian_train_config_keeps_gaussian_radius_clip():
 
     assert op_cfg.get("radius_clip") == 3.0
     assert op_cfg.get("img_radius_clip") == 3.0
+
+
+def test_train_config_passes_backward_mode():
+    cfg = _cfg("gaussian")
+
+    op_cfg = make_train_config(
+        cfg,
+        img_shape=(32, 32),
+        vol_dims=(8, 8, 8),
+        scale_min_world=0.001,
+        scale_max_world=1.0,
+    )
+
+    assert op_cfg.get("backward_mode") == "primitive"
+    assert op_cfg.get("img_backward_mode") == "primitive"
+    assert op_cfg.get("vol_backward_mode") == "primitive"
+
+
+def test_train_config_rejects_ambiguous_gaussian_backward_mode():
+    cfg = _cfg("gaussian")
+    cfg.trainer.backward_mode = "gaussian"
+
+    with pytest.raises(ValueError, match="pixel.*primitive"):
+        make_train_config(
+            cfg,
+            img_shape=(32, 32),
+            vol_dims=(8, 8, 8),
+            scale_min_world=0.001,
+            scale_max_world=1.0,
+        )

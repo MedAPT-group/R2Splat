@@ -56,9 +56,10 @@ __device__ __forceinline__ uint32_t clamp_tile_bound(OpS value, uint32_t upper) 
 template <typename S>
 __global__ void compute_tiles_per_gauss_kernel(
     const S* __restrict__ means2d,          // [C * N, 2]
-    const int32_t* __restrict__ radii,      // [C * N]
+    const int32_t* __restrict__ radii,      // [C * N] or [C * N, 2]
     int32_t* __restrict__ tiles_per_gauss,  // [C * N]
     const uint32_t total_elems,             // C * N
+    const bool radii_is_rect,
     const uint32_t tile_size,
     const uint32_t n_tiles_dim1,            // number of tiles in x (columns)
     const uint32_t n_tiles_dim0             // number of tiles in y (rows)
@@ -71,9 +72,10 @@ __global__ void compute_tiles_per_gauss_kernel(
         return;
     }
     
-    // Get radius for this Gaussian
-    const OpS radius = static_cast<OpS>(radii[idx]);
-    if (radius <= 0) {
+    // Get radius for this Gaussian. Rectangular radii store (rx, ry).
+    const OpS radius_x = static_cast<OpS>(radii_is_rect ? radii[2 * idx] : radii[idx]);
+    const OpS radius_y = static_cast<OpS>(radii_is_rect ? radii[2 * idx + 1] : radii[idx]);
+    if (radius_x <= 0 || radius_y <= 0) {
         tiles_per_gauss[idx] = 0;
         return;
     }
@@ -88,16 +90,17 @@ __global__ void compute_tiles_per_gauss_kernel(
     
     // Convert to tile coordinates
     const OpS tile_size_f = static_cast<OpS>(tile_size);
-    const OpS tile_radius = radius / tile_size_f;
+    const OpS tile_radius_x = radius_x / tile_size_f;
+    const OpS tile_radius_y = radius_y / tile_size_f;
     const OpS tile_x = mean_x / tile_size_f;
     const OpS tile_y = mean_y / tile_size_f;
     
     // Compute tile bounding box (tile_min inclusive, tile_max exclusive)
     // dim1 = x = columns, dim0 = y = rows
-    uint32_t tile_min_dim1 = clamp_tile_bound(floor(tile_x - tile_radius), n_tiles_dim1);
-    uint32_t tile_min_dim0 = clamp_tile_bound(floor(tile_y - tile_radius), n_tiles_dim0);
-    uint32_t tile_max_dim1 = clamp_tile_bound(ceil(tile_x + tile_radius), n_tiles_dim1);
-    uint32_t tile_max_dim0 = clamp_tile_bound(ceil(tile_y + tile_radius), n_tiles_dim0);
+    uint32_t tile_min_dim1 = clamp_tile_bound(floor(tile_x - tile_radius_x), n_tiles_dim1);
+    uint32_t tile_min_dim0 = clamp_tile_bound(floor(tile_y - tile_radius_y), n_tiles_dim0);
+    uint32_t tile_max_dim1 = clamp_tile_bound(ceil(tile_x + tile_radius_x), n_tiles_dim1);
+    uint32_t tile_max_dim0 = clamp_tile_bound(ceil(tile_y + tile_radius_y), n_tiles_dim0);
     if (tile_max_dim1 <= tile_min_dim1 || tile_max_dim0 <= tile_min_dim0) {
         tiles_per_gauss[idx] = 0;
         return;
@@ -134,12 +137,13 @@ __global__ void compute_tiles_per_gauss_kernel(
 template <typename S>
 __global__ void generate_isect_records_kernel(
     const S* __restrict__ means2d,                   // [C * N, 2]
-    const int32_t* __restrict__ radii,               // [C * N]
+    const int32_t* __restrict__ radii,               // [C * N] or [C * N, 2]
     const int64_t* __restrict__ cum_tiles_per_gauss, // [C * N]
     int64_t* __restrict__ isect_ids,                 // [n_isects]
     int32_t* __restrict__ flatten_ids,               // [n_isects]
     const uint32_t total_elems,                      // C * N
     const uint32_t N,                                // Gaussians per camera
+    const bool radii_is_rect,
     const uint32_t tile_size,
     const uint32_t n_tiles_dim1,                     // number of tiles in x (columns)
     const uint32_t n_tiles_dim0,                     // number of tiles in y (rows)
@@ -153,9 +157,10 @@ __global__ void generate_isect_records_kernel(
         return;
     }
     
-    // Get radius for this Gaussian
-    const OpS radius = static_cast<OpS>(radii[idx]);
-    if (radius <= 0) {
+    // Get radius for this Gaussian. Rectangular radii store (rx, ry).
+    const OpS radius_x = static_cast<OpS>(radii_is_rect ? radii[2 * idx] : radii[idx]);
+    const OpS radius_y = static_cast<OpS>(radii_is_rect ? radii[2 * idx + 1] : radii[idx]);
+    if (radius_x <= 0 || radius_y <= 0) {
         return;  // No intersections
     }
     
@@ -168,16 +173,17 @@ __global__ void generate_isect_records_kernel(
     
     // Convert to tile coordinates
     const OpS tile_size_f = static_cast<OpS>(tile_size);
-    const OpS tile_radius = radius / tile_size_f;
+    const OpS tile_radius_x = radius_x / tile_size_f;
+    const OpS tile_radius_y = radius_y / tile_size_f;
     const OpS tile_x = mean_x / tile_size_f;
     const OpS tile_y = mean_y / tile_size_f;
     
     // Compute tile bounding box (same as first pass)
     // dim1 = x = columns, dim0 = y = rows
-    uint32_t tile_min_dim1 = clamp_tile_bound(floor(tile_x - tile_radius), n_tiles_dim1);
-    uint32_t tile_min_dim0 = clamp_tile_bound(floor(tile_y - tile_radius), n_tiles_dim0);
-    uint32_t tile_max_dim1 = clamp_tile_bound(ceil(tile_x + tile_radius), n_tiles_dim1);
-    uint32_t tile_max_dim0 = clamp_tile_bound(ceil(tile_y + tile_radius), n_tiles_dim0);
+    uint32_t tile_min_dim1 = clamp_tile_bound(floor(tile_x - tile_radius_x), n_tiles_dim1);
+    uint32_t tile_min_dim0 = clamp_tile_bound(floor(tile_y - tile_radius_y), n_tiles_dim0);
+    uint32_t tile_max_dim1 = clamp_tile_bound(ceil(tile_x + tile_radius_x), n_tiles_dim1);
+    uint32_t tile_max_dim0 = clamp_tile_bound(ceil(tile_y + tile_radius_y), n_tiles_dim0);
     if (tile_max_dim1 <= tile_min_dim1 || tile_max_dim0 <= tile_min_dim0) {
         return;
     }
@@ -277,6 +283,7 @@ void launch_compute_tiles_per_gauss(
     int32_t* __restrict__ tiles_per_gauss,
     uint32_t C,
     uint32_t N,
+    bool radii_is_rect,
     uint32_t tile_size,
     uint32_t n_tiles_dim1,
     uint32_t n_tiles_dim0,
@@ -292,6 +299,7 @@ void launch_compute_tiles_per_gauss(
         radii,
         tiles_per_gauss,
         total_elems,
+        radii_is_rect,
         tile_size,
         n_tiles_dim1,
         n_tiles_dim0
@@ -307,6 +315,7 @@ void launch_generate_isect_records(
     int32_t* __restrict__ flatten_ids,
     uint32_t C,
     uint32_t N,
+    bool radii_is_rect,
     uint32_t tile_size,
     uint32_t n_tiles_dim1,
     uint32_t n_tiles_dim0,
@@ -326,6 +335,7 @@ void launch_generate_isect_records(
         flatten_ids,
         total_elems,
         N,
+        radii_is_rect,
         tile_size,
         n_tiles_dim1,
         n_tiles_dim0,
@@ -361,24 +371,24 @@ void launch_isect_offset_encode(
 
 template void launch_compute_tiles_per_gauss<float>(
     const float*, const int32_t*, int32_t*,
-    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, cudaStream_t
+    uint32_t, uint32_t, bool, uint32_t, uint32_t, uint32_t, cudaStream_t
 );
 
 template void launch_compute_tiles_per_gauss<double>(
     const double*, const int32_t*, int32_t*,
-    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, cudaStream_t
+    uint32_t, uint32_t, bool, uint32_t, uint32_t, uint32_t, cudaStream_t
 );
 
 template void launch_generate_isect_records<float>(
     const float*, const int32_t*, const int64_t*,
     int64_t*, int32_t*,
-    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, cudaStream_t
+    uint32_t, uint32_t, bool, uint32_t, uint32_t, uint32_t, uint32_t, cudaStream_t
 );
 
 template void launch_generate_isect_records<double>(
     const double*, const int32_t*, const int64_t*,
     int64_t*, int32_t*,
-    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, cudaStream_t
+    uint32_t, uint32_t, bool, uint32_t, uint32_t, uint32_t, uint32_t, cudaStream_t
 );
 
 // ============================================================================

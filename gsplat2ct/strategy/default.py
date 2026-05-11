@@ -139,6 +139,8 @@ class DefaultStrategy:
             raise ValueError(
                 f"radii_2d shape {tuple(radii_2d.shape)} != (C,N)=({C},{N})"
             )
+        if radii_2d.dim() not in (2, 3):
+            raise ValueError(f"radii_2d must have shape (C,N) or (C,N,2), got {radii_2d.shape}")
 
         if self.absgrad and v_means2d_abs is not None and v_means2d_abs.numel() > 0:
             g = v_means2d_abs.detach().clone()
@@ -151,6 +153,8 @@ class DefaultStrategy:
         _ = n_cameras  # Kept in the interface; r2-compatible stats ignore batch size.
 
         sel = radii_2d > 0
+        if sel.dim() == 3:
+            sel = sel.all(dim=-1)
         if not sel.any():
             return
 

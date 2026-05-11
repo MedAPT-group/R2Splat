@@ -315,6 +315,183 @@ void launch_voxelize_to_voxels_bwd(
 }
 
 // ============================================================================
+// Per-Gaussian-Tile First-Order Backward Pass Kernel
+// ============================================================================
+
+template <typename S>
+__global__ void voxelize_to_voxels_bwd_per_gaussian_kernel(
+    const uint32_t N,
+    const uint32_t n_isects,
+    const vec3<S>* __restrict__ means3d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const uint32_t n_tiles_dim2,
+    const uint32_t n_tiles_dim1,
+    const uint32_t n_tiles_dim0,
+    const int64_t* __restrict__ isect_ids,
+    const int32_t* __restrict__ flatten_ids,
+    const S* __restrict__ v_render_output,
+    vec3<S>* __restrict__ v_means3d,
+    S* __restrict__ v_conics,
+    S* __restrict__ v_opacities
+) {
+    auto block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+    const uint32_t warps_per_block = block.size() / warp.size();
+    const uint32_t isect_idx =
+        block.group_index().x * warps_per_block + warp.meta_group_rank();
+    if (isect_idx >= n_isects) {
+        return;
+    }
+
+    const uint32_t n_tiles = n_tiles_dim0 * n_tiles_dim1 * n_tiles_dim2;
+    const uint32_t tile_id = static_cast<uint32_t>(isect_ids[isect_idx]);
+    if (tile_id >= n_tiles) {
+        return;
+    }
+
+    const uint32_t tiles_per_z = n_tiles_dim1 * n_tiles_dim2;
+    const uint32_t tile_dim0 = tile_id / tiles_per_z;
+    const uint32_t rem0 = tile_id - tile_dim0 * tiles_per_z;
+    const uint32_t tile_dim1 = rem0 / n_tiles_dim2;
+    const uint32_t tile_dim2 = rem0 - tile_dim1 * n_tiles_dim2;
+    const uint32_t origin_i = tile_dim0 * tile_size;
+    const uint32_t origin_j = tile_dim1 * tile_size;
+    const uint32_t origin_k = tile_dim2 * tile_size;
+
+    const int32_t g = flatten_ids[isect_idx];
+    if (g < 0 || g >= static_cast<int32_t>(N)) {
+        return;
+    }
+
+    const vec3<S> xyz = means3d[g];
+    const S opac = opacities[g];
+    const S* conic_ptr = conics + g * 6;
+    const S a = conic_ptr[0], p = conic_ptr[1], q = conic_ptr[2];
+    const S bb = conic_ptr[3], r = conic_ptr[4], c = conic_ptr[5];
+
+    vec3<S> v_xyz_local = {static_cast<S>(0), static_cast<S>(0), static_cast<S>(0)};
+    S v_conic_local[6] = {0, 0, 0, 0, 0, 0};
+    S v_opacity_local = static_cast<S>(0);
+
+    const uint32_t voxels_per_tile = tile_size * tile_size * tile_size;
+    for (uint32_t local_idx = warp.thread_rank(); local_idx < voxels_per_tile; local_idx += warp.size()) {
+        const uint32_t local_i = local_idx / (tile_size * tile_size);
+        const uint32_t rem = local_idx - local_i * tile_size * tile_size;
+        const uint32_t local_j = rem / tile_size;
+        const uint32_t local_k = rem - local_j * tile_size;
+        const uint32_t i = origin_i + local_i;
+        const uint32_t j = origin_j + local_j;
+        const uint32_t k = origin_k + local_k;
+        if (i >= dim0 || j >= dim1 || k >= dim2) {
+            continue;
+        }
+
+        const S px = static_cast<S>(k) + static_cast<S>(0.5);
+        const S py = static_cast<S>(j) + static_cast<S>(0.5);
+        const S pz = static_cast<S>(i) + static_cast<S>(0.5);
+        const S d1 = px - xyz.x;
+        const S d2 = py - xyz.y;
+        const S d3 = pz - xyz.z;
+        const S sigma = static_cast<S>(0.5) * (a*d1*d1 + bb*d2*d2 + c*d3*d3) +
+                        p*d1*d2 + q*d1*d3 + r*d2*d3;
+        const S vis = exp(-sigma);
+        const S alpha = opac * vis;
+        if (sigma < static_cast<S>(0) || fabs(alpha) < static_cast<S>(1e-6)) {
+            continue;
+        }
+
+        const S v_O = v_render_output[i * dim1 * dim2 + j * dim2 + k];
+        const S v_sigma = -v_O * opac * vis;
+        const S oI = opac * vis;
+
+        v_opacity_local += v_O * vis;
+        v_conic_local[0] += v_sigma * static_cast<S>(0.5) * d1 * d1;
+        v_conic_local[1] += v_sigma * d1 * d2;
+        v_conic_local[2] += v_sigma * d1 * d3;
+        v_conic_local[3] += v_sigma * static_cast<S>(0.5) * d2 * d2;
+        v_conic_local[4] += v_sigma * d2 * d3;
+        v_conic_local[5] += v_sigma * static_cast<S>(0.5) * d3 * d3;
+        v_xyz_local.x += v_O * oI * (a*d1 + p*d2 + q*d3);
+        v_xyz_local.y += v_O * oI * (bb*d2 + p*d1 + r*d3);
+        v_xyz_local.z += v_O * oI * (c*d3 + q*d1 + r*d2);
+    }
+
+    gsplat::warpSum(v_xyz_local, warp);
+    gsplat::warpSum<6>(v_conic_local, warp);
+    gsplat::warpSum(v_opacity_local, warp);
+
+    if (warp.thread_rank() == 0) {
+        S* v_xyz_ptr = reinterpret_cast<S*>(v_means3d) + 3 * g;
+        atomicAdd(v_xyz_ptr, v_xyz_local.x);
+        atomicAdd(v_xyz_ptr + 1, v_xyz_local.y);
+        atomicAdd(v_xyz_ptr + 2, v_xyz_local.z);
+
+        S* v_conic_ptr = v_conics + 6 * g;
+        #pragma unroll
+        for (int idx = 0; idx < 6; ++idx) {
+            atomicAdd(v_conic_ptr + idx, v_conic_local[idx]);
+        }
+        atomicAdd(v_opacities + g, v_opacity_local);
+    }
+}
+
+template <typename S>
+void launch_voxelize_to_voxels_bwd_per_gaussian(
+    const S* __restrict__ means3d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const int64_t* __restrict__ isect_ids,
+    const int32_t* __restrict__ flatten_ids,
+    const S* __restrict__ v_render_output,
+    S* __restrict__ v_means3d,
+    S* __restrict__ v_conics,
+    S* __restrict__ v_opacities,
+    uint32_t N,
+    uint32_t n_isects,
+    uint32_t dim2,
+    uint32_t dim1,
+    uint32_t dim0,
+    uint32_t tile_size,
+    uint32_t n_tiles_dim2,
+    uint32_t n_tiles_dim1,
+    uint32_t n_tiles_dim0,
+    cudaStream_t stream
+) {
+    constexpr uint32_t threads_per_block = 256;
+    constexpr uint32_t warps_per_block = threads_per_block / 32;
+    const uint32_t blocks = (n_isects + warps_per_block - 1) / warps_per_block;
+    if (blocks == 0) {
+        return;
+    }
+
+    voxelize_to_voxels_bwd_per_gaussian_kernel<S><<<blocks, threads_per_block, 0, stream>>>(
+        N,
+        n_isects,
+        reinterpret_cast<const vec3<S>*>(means3d),
+        conics,
+        opacities,
+        dim2,
+        dim1,
+        dim0,
+        tile_size,
+        n_tiles_dim2,
+        n_tiles_dim1,
+        n_tiles_dim0,
+        isect_ids,
+        flatten_ids,
+        v_render_output,
+        reinterpret_cast<vec3<S>*>(v_means3d),
+        v_conics,
+        v_opacities
+    );
+}
+
+// ============================================================================
 // Beta First-Order Backward Pass Kernel
 // ============================================================================
 
@@ -563,6 +740,200 @@ void launch_beta_voxelize_to_voxels_bwd(
     );
 }
 
+template <typename S>
+__global__ void beta_voxelize_to_voxels_bwd_per_gaussian_kernel(
+    const uint32_t N,
+    const uint32_t n_isects,
+    const vec3<S>* __restrict__ means3d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const S* __restrict__ betas,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const uint32_t n_tiles_dim2,
+    const uint32_t n_tiles_dim1,
+    const uint32_t n_tiles_dim0,
+    const int64_t* __restrict__ isect_ids,
+    const int32_t* __restrict__ flatten_ids,
+    const S* __restrict__ v_render_output,
+    vec3<S>* __restrict__ v_means3d,
+    S* __restrict__ v_conics,
+    S* __restrict__ v_opacities,
+    S* __restrict__ v_betas
+) {
+    auto block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+    const uint32_t warps_per_block = block.size() / warp.size();
+    const uint32_t isect_idx =
+        block.group_index().x * warps_per_block + warp.meta_group_rank();
+    if (isect_idx >= n_isects) {
+        return;
+    }
+
+    const uint32_t n_tiles = n_tiles_dim0 * n_tiles_dim1 * n_tiles_dim2;
+    const uint32_t tile_id = static_cast<uint32_t>(isect_ids[isect_idx]);
+    if (tile_id >= n_tiles) {
+        return;
+    }
+
+    const uint32_t tiles_per_z = n_tiles_dim1 * n_tiles_dim2;
+    const uint32_t tile_dim0 = tile_id / tiles_per_z;
+    const uint32_t rem0 = tile_id - tile_dim0 * tiles_per_z;
+    const uint32_t tile_dim1 = rem0 / n_tiles_dim2;
+    const uint32_t tile_dim2 = rem0 - tile_dim1 * n_tiles_dim2;
+    const uint32_t origin_i = tile_dim0 * tile_size;
+    const uint32_t origin_j = tile_dim1 * tile_size;
+    const uint32_t origin_k = tile_dim2 * tile_size;
+
+    const int32_t g = flatten_ids[isect_idx];
+    if (g < 0 || g >= static_cast<int32_t>(N)) {
+        return;
+    }
+
+    const vec3<S> xyz = means3d[g];
+    const S opac = opacities[g];
+    const S beta = betas[g];
+    const S* conic_ptr = conics + g * 6;
+    const S a = conic_ptr[0], p = conic_ptr[1], q = conic_ptr[2];
+    const S bb = conic_ptr[3], r = conic_ptr[4], c = conic_ptr[5];
+
+    vec3<S> v_xyz_local = {static_cast<S>(0), static_cast<S>(0), static_cast<S>(0)};
+    S v_conic_local[6] = {0, 0, 0, 0, 0, 0};
+    S v_opacity_local = static_cast<S>(0);
+    S v_beta_local = static_cast<S>(0);
+
+    const uint32_t voxels_per_tile = tile_size * tile_size * tile_size;
+    for (uint32_t local_idx = warp.thread_rank(); local_idx < voxels_per_tile; local_idx += warp.size()) {
+        const uint32_t local_i = local_idx / (tile_size * tile_size);
+        const uint32_t rem = local_idx - local_i * tile_size * tile_size;
+        const uint32_t local_j = rem / tile_size;
+        const uint32_t local_k = rem - local_j * tile_size;
+        const uint32_t i = origin_i + local_i;
+        const uint32_t j = origin_j + local_j;
+        const uint32_t k = origin_k + local_k;
+        if (i >= dim0 || j >= dim1 || k >= dim2) {
+            continue;
+        }
+
+        const S px = static_cast<S>(k) + static_cast<S>(0.5);
+        const S py = static_cast<S>(j) + static_cast<S>(0.5);
+        const S pz = static_cast<S>(i) + static_cast<S>(0.5);
+        const S d1 = xyz.x - px;
+        const S d2 = xyz.y - py;
+        const S d3 = xyz.z - pz;
+        const S qfull =
+            a * d1 * d1 + bb * d2 * d2 + c * d3 * d3 +
+            static_cast<S>(2) * p * d1 * d2 +
+            static_cast<S>(2) * q * d1 * d3 +
+            static_cast<S>(2) * r * d2 * d3;
+        const S h = static_cast<S>(1) - qfull;
+        if (qfull < static_cast<S>(0) || h <= static_cast<S>(0)) {
+            continue;
+        }
+
+        const S vis = pow(h, beta);
+        const S alpha = opac * vis;
+        if (fabs(alpha) < static_cast<S>(1e-5)) {
+            continue;
+        }
+
+        const S v_O = v_render_output[i * dim1 * dim2 + j * dim2 + k];
+        const S v_q = -opac * beta * pow(h, beta - static_cast<S>(1)) * v_O;
+        const S wx = a * d1 + p * d2 + q * d3;
+        const S wy = bb * d2 + p * d1 + r * d3;
+        const S wz = c * d3 + q * d1 + r * d2;
+
+        v_xyz_local.x += static_cast<S>(2) * v_q * wx;
+        v_xyz_local.y += static_cast<S>(2) * v_q * wy;
+        v_xyz_local.z += static_cast<S>(2) * v_q * wz;
+        v_conic_local[0] += v_q * d1 * d1;
+        v_conic_local[1] += static_cast<S>(2) * v_q * d1 * d2;
+        v_conic_local[2] += static_cast<S>(2) * v_q * d1 * d3;
+        v_conic_local[3] += v_q * d2 * d2;
+        v_conic_local[4] += static_cast<S>(2) * v_q * d2 * d3;
+        v_conic_local[5] += v_q * d3 * d3;
+        v_opacity_local += v_O * vis;
+        v_beta_local += v_O * alpha * log(h);
+    }
+
+    gsplat::warpSum(v_xyz_local, warp);
+    gsplat::warpSum<6>(v_conic_local, warp);
+    gsplat::warpSum(v_opacity_local, warp);
+    gsplat::warpSum(v_beta_local, warp);
+
+    if (warp.thread_rank() == 0) {
+        S* v_xyz_ptr = reinterpret_cast<S*>(v_means3d) + 3 * g;
+        atomicAdd(v_xyz_ptr, v_xyz_local.x);
+        atomicAdd(v_xyz_ptr + 1, v_xyz_local.y);
+        atomicAdd(v_xyz_ptr + 2, v_xyz_local.z);
+
+        S* v_conic_ptr = v_conics + 6 * g;
+        #pragma unroll
+        for (int idx = 0; idx < 6; ++idx) {
+            atomicAdd(v_conic_ptr + idx, v_conic_local[idx]);
+        }
+        atomicAdd(v_opacities + g, v_opacity_local);
+        atomicAdd(v_betas + g, v_beta_local);
+    }
+}
+
+template <typename S>
+void launch_beta_voxelize_to_voxels_bwd_per_gaussian(
+    const S* __restrict__ means3d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const S* __restrict__ betas,
+    const int64_t* __restrict__ isect_ids,
+    const int32_t* __restrict__ flatten_ids,
+    const S* __restrict__ v_render_output,
+    S* __restrict__ v_means3d,
+    S* __restrict__ v_conics,
+    S* __restrict__ v_opacities,
+    S* __restrict__ v_betas,
+    uint32_t N,
+    uint32_t n_isects,
+    uint32_t dim2,
+    uint32_t dim1,
+    uint32_t dim0,
+    uint32_t tile_size,
+    uint32_t n_tiles_dim2,
+    uint32_t n_tiles_dim1,
+    uint32_t n_tiles_dim0,
+    cudaStream_t stream
+) {
+    constexpr uint32_t threads_per_block = 256;
+    constexpr uint32_t warps_per_block = threads_per_block / 32;
+    const uint32_t blocks = (n_isects + warps_per_block - 1) / warps_per_block;
+    if (blocks == 0) {
+        return;
+    }
+
+    beta_voxelize_to_voxels_bwd_per_gaussian_kernel<S><<<blocks, threads_per_block, 0, stream>>>(
+        N,
+        n_isects,
+        reinterpret_cast<const vec3<S>*>(means3d),
+        conics,
+        opacities,
+        betas,
+        dim2,
+        dim1,
+        dim0,
+        tile_size,
+        n_tiles_dim2,
+        n_tiles_dim1,
+        n_tiles_dim0,
+        isect_ids,
+        flatten_ids,
+        v_render_output,
+        reinterpret_cast<vec3<S>*>(v_means3d),
+        v_conics,
+        v_opacities,
+        v_betas
+    );
+}
+
 template void launch_voxelize_to_voxels_bwd<float>(
     const float*, const float*, const float*,
     const int32_t*, const int32_t*,
@@ -583,6 +954,26 @@ template void launch_voxelize_to_voxels_bwd<double>(
     cudaStream_t
 );
 
+template void launch_voxelize_to_voxels_bwd_per_gaussian<float>(
+    const float*, const float*, const float*,
+    const int64_t*, const int32_t*,
+    const float*,
+    float*, float*, float*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
+template void launch_voxelize_to_voxels_bwd_per_gaussian<double>(
+    const double*, const double*, const double*,
+    const int64_t*, const int32_t*,
+    const double*,
+    double*, double*, double*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
 template void launch_beta_voxelize_to_voxels_bwd<float>(
     const float*, const float*, const float*, const float*,
     const int32_t*, const int32_t*,
@@ -596,6 +987,26 @@ template void launch_beta_voxelize_to_voxels_bwd<float>(
 template void launch_beta_voxelize_to_voxels_bwd<double>(
     const double*, const double*, const double*, const double*,
     const int32_t*, const int32_t*,
+    const double*,
+    double*, double*, double*, double*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
+template void launch_beta_voxelize_to_voxels_bwd_per_gaussian<float>(
+    const float*, const float*, const float*, const float*,
+    const int64_t*, const int32_t*,
+    const float*,
+    float*, float*, float*, float*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
+template void launch_beta_voxelize_to_voxels_bwd_per_gaussian<double>(
+    const double*, const double*, const double*, const double*,
+    const int64_t*, const int32_t*,
     const double*,
     double*, double*, double*, double*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,

@@ -30,7 +30,7 @@ namespace gsplat2ct {
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 isect_tiles_tensor(
     const torch::Tensor& means2d,    // [C, N, 2]
-    const torch::Tensor& radii,      // [C, N]
+    const torch::Tensor& radii,      // [C, N] or [C, N, 2]
     const uint32_t tile_size,
     const uint32_t n_tiles_dim1,     // number of tiles in x (columns)
     const uint32_t n_tiles_dim0      // number of tiles in y (rows)
@@ -41,7 +41,10 @@ isect_tiles_tensor(
     
     // Validate input dimensions
     TORCH_CHECK(means2d.dim() == 3, "means2d must be 3D [C, N, 2]");
-    TORCH_CHECK(radii.dim() == 2, "radii must be 2D [C, N]");
+    TORCH_CHECK(
+        radii.dim() == 2 || (radii.dim() == 3 && radii.size(2) == 2),
+        "radii must be 2D [C, N] or 3D [C, N, 2]"
+    );
     TORCH_CHECK(means2d.size(2) == 2, "means2d last dim must be 2");
     TORCH_CHECK(means2d.size(0) == radii.size(0), "C dimension must match");
     TORCH_CHECK(means2d.size(1) == radii.size(1), "N dimension must match");
@@ -50,6 +53,7 @@ isect_tiles_tensor(
     const uint32_t N = static_cast<uint32_t>(means2d.size(1));
     const uint32_t total_elems = C * N;
     const uint32_t n_tiles = n_tiles_dim0 * n_tiles_dim1;
+    const bool radii_is_rect = radii.dim() == 3;
     
     at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
     
@@ -78,6 +82,7 @@ isect_tiles_tensor(
                 radii.data_ptr<int32_t>(),
                 tiles_per_gauss.data_ptr<int32_t>(),
                 C, N,
+                radii_is_rect,
                 tile_size,
                 n_tiles_dim1,
                 n_tiles_dim0,
@@ -119,6 +124,7 @@ isect_tiles_tensor(
                 isect_ids.data_ptr<int64_t>(),
                 flatten_ids.data_ptr<int32_t>(),
                 C, N,
+                radii_is_rect,
                 tile_size,
                 n_tiles_dim1,
                 n_tiles_dim0,

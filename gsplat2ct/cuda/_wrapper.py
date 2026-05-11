@@ -31,12 +31,24 @@ isect_offset_encode_3d = _make_cuda_func("isect_offset_encode_3d")
 
 voxelize_to_voxels_fwd = _make_cuda_func("voxelize_to_voxels_fwd")
 voxelize_to_voxels_bwd = _make_cuda_func("voxelize_to_voxels_bwd")
+voxelize_to_voxels_bwd_per_gaussian = _make_cuda_func(
+    "voxelize_to_voxels_bwd_per_gaussian"
+)
 beta_voxelize_to_voxels_fwd = _make_cuda_func("beta_voxelize_to_voxels_fwd")
 beta_voxelize_to_voxels_bwd = _make_cuda_func("beta_voxelize_to_voxels_bwd")
+beta_voxelize_to_voxels_bwd_per_gaussian = _make_cuda_func(
+    "beta_voxelize_to_voxels_bwd_per_gaussian"
+)
 rasterize_to_pixels_fwd = _make_cuda_func("rasterize_to_pixels_fwd")
 rasterize_to_pixels_bwd = _make_cuda_func("rasterize_to_pixels_bwd")
+rasterize_to_pixels_bwd_per_gaussian = _make_cuda_func(
+    "rasterize_to_pixels_bwd_per_gaussian"
+)
 beta_rasterize_to_pixels_fwd = _make_cuda_func("beta_rasterize_to_pixels_fwd")
 beta_rasterize_to_pixels_bwd = _make_cuda_func("beta_rasterize_to_pixels_bwd")
+beta_rasterize_to_pixels_bwd_per_gaussian = _make_cuda_func(
+    "beta_rasterize_to_pixels_bwd_per_gaussian"
+)
 
 conics_mu_fwd = _make_cuda_func("conics_mu_fwd")
 conics_mu_bwd = _make_cuda_func("conics_mu_bwd")
@@ -70,12 +82,16 @@ __all__ = [
     "isect_offset_encode_3d",
     "voxelize_to_voxels_fwd",
     "voxelize_to_voxels_bwd",
+    "voxelize_to_voxels_bwd_per_gaussian",
     "beta_voxelize_to_voxels_fwd",
     "beta_voxelize_to_voxels_bwd",
+    "beta_voxelize_to_voxels_bwd_per_gaussian",
     "rasterize_to_pixels_fwd",
     "rasterize_to_pixels_bwd",
+    "rasterize_to_pixels_bwd_per_gaussian",
     "beta_rasterize_to_pixels_fwd",
     "beta_rasterize_to_pixels_bwd",
+    "beta_rasterize_to_pixels_bwd_per_gaussian",
     "conics_mu_fwd",
     "conics_mu_bwd",
     "world_to_image_projection_fwd",
