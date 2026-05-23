@@ -12,6 +12,11 @@ from .data import (
 from .gs3d_ct_rasterize import GS3DCTRasterizeCUDA
 from .gs3d_ct_train import GS3DCTLossCUDA
 from .gs3d_ct_voxelize import GS3DCTVoxelizeCUDA
+from .torch_autograd import (
+    GaussianMappingVoxelizer,
+    GaussianProjectionRasterizer,
+    activate_gaussian_params,
+)
 
 __all__ = [
     "ForwardBackwardBase",
@@ -24,4 +29,7 @@ __all__ = [
     "GS3DCTLossCUDA",
     "GS3DCTRasterizeCUDA",
     "GS3DCTVoxelizeCUDA",
+    "GaussianMappingVoxelizer",
+    "GaussianProjectionRasterizer",
+    "activate_gaussian_params",
 ]

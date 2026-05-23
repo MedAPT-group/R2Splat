@@ -18,19 +18,28 @@ from typing import Any, Dict, List, Optional, Tuple
 import hydra
 import numpy as np
 import torch
+import torch.nn as nn
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from gsplat2ct.data.ctproj import CTImageDataset, CTImageParser
 from gsplat2ct.eval.evaluator import ProjectionEvaluator, VolumeEvaluator
+from gsplat2ct.eval.metric import ssim2d
 from gsplat2ct.model.ct_initializer import initialize_from_metadata
 from gsplat2ct.model.gaussian_params import GaussianParams
 from gsplat2ct.model.scale import resolve_scale_bounds
 from gsplat2ct.ops.data import Config, Data, ForwardResult, Params
 from gsplat2ct.ops.gs3d_ct_train import GS3DCTLossCUDA
+from gsplat2ct.ops.torch_autograd import (
+    GaussianMappingVoxelizer,
+    GaussianProjectionRasterizer,
+    activate_gaussian_params,
+    pop_last_raster_absgrad,
+)
 from gsplat2ct.optim.base import FirstOrderConfig
 from gsplat2ct.optim.gs3d_ct import GS3DCTAdamOptimizer
+from gsplat2ct.optim.scheduler import _factor as _lr_schedule_factor
 from gsplat2ct.vis.plotting import save_projection_comparison, save_volume_comparison
 
 
@@ -295,6 +304,174 @@ def build_optimizer(cfg: DictConfig, params: Params) -> GS3DCTAdamOptimizer:
     return GS3DCTAdamOptimizer(params, config)
 
 
+def _wrap_gp_parameters(gp: GaussianParams) -> None:
+    """Make Gaussian tensors leaf ``nn.Parameter`` objects for torch optimizers."""
+    for name in ("means", "quats", "scale_ori", "opacity", "beta"):
+        tensor = getattr(gp, name, None)
+        if tensor is None:
+            continue
+        if isinstance(tensor, nn.Parameter):
+            if not tensor.requires_grad:
+                tensor.requires_grad_(True)
+            continue
+        setattr(gp, name, nn.Parameter(tensor.detach().clone().contiguous()))
+
+
+def _torch_param_groups(cfg: DictConfig, gp: GaussianParams) -> List[Dict[str, Any]]:
+    groups: List[Dict[str, Any]] = [
+        {"params": [gp.means], "lr": float(cfg.optim.lr_means), "name": "means"},
+        {"params": [gp.quats], "lr": float(cfg.optim.lr_quats), "name": "quats"},
+        {"params": [gp.scale_ori], "lr": float(cfg.optim.lr_scale_ori), "name": "scale_ori"},
+        {"params": [gp.opacity], "lr": float(cfg.optim.lr_opacity), "name": "opacity"},
+    ]
+    if gp.beta is not None:
+        groups.append(
+            {
+                "params": [gp.beta],
+                "lr": float(getattr(cfg.optim, "lr_beta", cfg.optim.lr_opacity)),
+                "name": "beta",
+            }
+        )
+    return groups
+
+
+def build_torch_optimizer(cfg: DictConfig, gp: GaussianParams) -> torch.optim.Adam:
+    _wrap_gp_parameters(gp)
+    return torch.optim.Adam(
+        _torch_param_groups(cfg, gp),
+        lr=0.0,
+        betas=(float(cfg.optim.beta1), float(cfg.optim.beta2)),
+        eps=float(cfg.optim.eps),
+    )
+
+
+def _set_torch_optimizer_lrs(
+    optimizer: torch.optim.Optimizer,
+    base_lrs: Dict[str, float],
+    cfg: DictConfig,
+    step: int,
+    max_steps: int,
+) -> None:
+    sched = getattr(cfg, "schedule", None)
+    if sched is None or not bool(getattr(sched, "enabled", False)):
+        factor = 1.0
+    else:
+        lr_cfg = getattr(sched, "lr", {})
+        factor = _lr_schedule_factor(
+            schedule_type=str(getattr(lr_cfg, "type", getattr(sched, "lr_type", "constant"))),
+            step=step,
+            max_steps=max_steps,
+            warmup_steps=int(getattr(lr_cfg, "warmup_steps", getattr(sched, "lr_warmup_steps", 0))),
+            min_factor=float(getattr(lr_cfg, "min_factor", getattr(sched, "lr_min_factor", 1.0))),
+        )
+    for group in optimizer.param_groups:
+        name = str(group.get("name", ""))
+        if name in base_lrs:
+            group["lr"] = float(base_lrs[name]) * float(factor)
+
+
+def _transition_state_tensor(
+    state: Optional[torch.Tensor],
+    *,
+    duplicate_sel: Optional[torch.Tensor] = None,
+    split_keep_parent: Optional[torch.Tensor] = None,
+    split_children: int = 0,
+    prune_keep: Optional[torch.Tensor] = None,
+    append_new: int = 0,
+) -> Optional[torch.Tensor]:
+    if state is None:
+        return None
+
+    def append_zeros(x: torch.Tensor, n_new: int) -> torch.Tensor:
+        if n_new <= 0:
+            return x
+        pad = torch.zeros((int(n_new),) + tuple(x.shape[1:]), device=x.device, dtype=x.dtype)
+        return torch.cat([x, pad], dim=0).contiguous()
+
+    out = state
+    if duplicate_sel is not None and duplicate_sel.numel() > 0:
+        out = append_zeros(out, int(duplicate_sel.numel()))
+    if split_keep_parent is not None:
+        keep = split_keep_parent.to(device=out.device, dtype=torch.bool)
+        if keep.numel() != out.shape[0]:
+            return None
+        out = out[keep].contiguous()
+        out = append_zeros(out, int(split_children))
+    if prune_keep is not None:
+        keep = prune_keep.to(device=out.device, dtype=torch.bool)
+        if keep.numel() != out.shape[0]:
+            return None
+        out = out[keep].contiguous()
+    if append_new > 0:
+        out = append_zeros(out, int(append_new))
+    return out
+
+
+def _rewrap_gp_after_topology(
+    gp: GaussianParams,
+    optimizer: torch.optim.Optimizer,
+    transition,
+) -> None:
+    old_by_name = {
+        str(group.get("name")): group["params"][0]
+        for group in optimizer.param_groups
+        if group.get("params")
+    }
+    old_state = {
+        name: optimizer.state.get(param, {}).copy()
+        for name, param in old_by_name.items()
+    }
+    _wrap_gp_parameters(gp)
+    new_by_name = {
+        "means": gp.means,
+        "quats": gp.quats,
+        "scale_ori": gp.scale_ori,
+        "opacity": gp.opacity,
+    }
+    if gp.beta is not None:
+        new_by_name["beta"] = gp.beta
+
+    optimizer.state.clear()
+    new_groups = []
+    for group in optimizer.param_groups:
+        name = str(group.get("name"))
+        if name not in new_by_name:
+            continue
+        group["params"] = [new_by_name[name]]
+        new_groups.append(group)
+        state_in = old_state.get(name, {})
+        migrated: Dict[str, Any] = {}
+        for key, value in state_in.items():
+            if torch.is_tensor(value) and value.dim() > 0 and value.shape[:1] == old_by_name[name].shape[:1]:
+                value = _transition_state_tensor(
+                    value,
+                    duplicate_sel=transition.duplicate_sel,
+                    split_keep_parent=transition.split_keep_parent,
+                    split_children=transition.split_children,
+                    prune_keep=transition.prune_keep,
+                    append_new=getattr(transition, "append_new", 0),
+                )
+                if value is None:
+                    continue
+            migrated[key] = value
+        if migrated:
+            optimizer.state[new_by_name[name]] = migrated
+    optimizer.param_groups[:] = new_groups
+
+
+def _torch_tv_loss(volume: torch.Tensor) -> torch.Tensor:
+    edge_count = (
+        (volume.shape[0] - 1) * volume.shape[1] * volume.shape[2]
+        + volume.shape[0] * (volume.shape[1] - 1) * volume.shape[2]
+        + volume.shape[0] * volume.shape[1] * (volume.shape[2] - 1)
+    )
+    return (
+        torch.diff(volume, dim=0).abs().sum()
+        + torch.diff(volume, dim=1).abs().sum()
+        + torch.diff(volume, dim=2).abs().sum()
+    ) / max(int(edge_count), 1)
+
+
 def train(cfg: DictConfig) -> None:
     train_start_time = time.time()
     _maybe_init_wandb(cfg)
@@ -403,27 +580,16 @@ def train(cfg: DictConfig) -> None:
     primitive_name = "Beta primitives" if gp.primitive_type == "beta" else "Gaussians"
     print(f"   {gp.num_gaussians} {primitive_name} initialized")
 
-    print("[3/5] Creating operator...")
-    operator = GS3DCTLossCUDA()
-    operator.initialize(
-        params,
-        make_train_config(
-            cfg,
-            (2, 2),
-            (2, 2, 2),
-            lambda_tv=0.0,
-            scale_min_world=scale_min_world,
-            scale_max_world=scale_max_world,
-        ),
-    )
+    print("[3/5] Preparing autograd splatting modules...")
+    _wrap_gp_parameters(gp)
+    params = gp.to_params()
 
-    print("[4/5] Creating Adam optimizer...")
-    optimizer = build_optimizer(cfg, params)
+    print("[4/5] Creating torch Adam optimizer...")
+    optimizer = build_torch_optimizer(cfg, gp)
+    base_lrs = {str(group["name"]): float(group["lr"]) for group in optimizer.param_groups}
 
-    from gsplat2ct.optim.scheduler import OptimizerScheduler
     from gsplat2ct.strategy import build_strategy
 
-    scheduler = OptimizerScheduler.from_hydra(getattr(cfg, "schedule", None) or {}, optimizer)
     strategy = build_strategy(getattr(cfg, "strategy", None) or {})
 
     print("[5/5] Starting training...")
@@ -481,7 +647,7 @@ def train(cfg: DictConfig) -> None:
         with open(loss_log_path, "w", encoding="utf-8"):
             pass
     for step in progress:
-        scheduler.step(step, max_steps)
+        _set_torch_optimizer_lrs(optimizer, base_lrs, cfg, step, max_steps)
 
         if angle_strategy == "random" or batch_size <= 1:
             batch_indices, shuffle_perm, perm_cursor = _sample_random_batch_indices(
@@ -531,9 +697,93 @@ def train(cfg: DictConfig) -> None:
             scale_max_world=scale_max_world,
         )
 
-        fwd, grad = operator.forward_backward1(params, data_obj, op_config)
-        optimizer.add_grad(grad)
-        loss_total, loss_img, loss_l1, loss_dssim, loss_tv = _extract_loss_values(fwd)
+        optimizer.zero_grad(set_to_none=True)
+        _quats, _scales, opacity, covars, max_scales = activate_gaussian_params(
+            gp.quats,
+            gp.scale_ori,
+            gp.opacity,
+            scale_min=scale_min_world,
+            scale_max=scale_max_world,
+        )
+        primitive_type = str(getattr(cfg.model, "primitive_type", "gaussian")).lower()
+        img_backward_mode = str(
+            op_config.get("img_backward_mode", op_config.get("backward_mode", "pixel"))
+        )
+        vol_backward_mode = str(
+            op_config.get("vol_backward_mode", op_config.get("backward_mode", "pixel"))
+        )
+        rasterizer = GaussianProjectionRasterizer(
+            img_w=img_w,
+            img_h=img_h,
+            tile_size=int(op_config.get("img_tile_size", 16)),
+            eps_blur=float(op_config.get("eps_blur", 0.3)),
+            radius_clip=float(op_config.get("img_radius_clip", 3.0)),
+            primitive_type=primitive_type,
+            absgrad=bool(op_config.get("absgrad", False)),
+            backward_mode=img_backward_mode,
+        )
+        render_pkg = rasterizer(
+            gp.means,
+            covars,
+            opacity,
+            data_obj.get("viewmats"),
+            data_obj.get("Ks"),
+            beta=gp.beta,
+            beta_gamma_init=float(op_config.get("beta_gamma_init", 3.5)),
+        )
+        if render_pkg.means2d.requires_grad:
+            render_pkg.means2d.retain_grad()
+
+        l1_loss = (render_pkg.image - data_obj.get("targets")).abs().mean()
+        if float(op_config.get("lambda_dssim", 0.0)) > 0.0:
+            dssim_loss = 1.0 - ssim2d(
+                render_pkg.image.unsqueeze(1),
+                data_obj.get("targets").unsqueeze(1),
+                window_size=int(op_config.get("ssim_window", 11)),
+            )
+        else:
+            dssim_loss = torch.zeros((), device=device, dtype=render_pkg.image.dtype)
+        img_loss = float(op_config.get("lambda_l1", 1.0)) * l1_loss + float(
+            op_config.get("lambda_dssim", 0.0)
+        ) * dssim_loss
+
+        if lambda_tv > 0.0:
+            voxelizer = GaussianMappingVoxelizer(
+                vol_dim2=int(op_config.get("vol_dim2")),
+                vol_dim1=int(op_config.get("vol_dim1")),
+                vol_dim0=int(op_config.get("vol_dim0")),
+                tile_size=int(op_config.get("vol_tile_size", 4)),
+                eps3d=float(op_config.get("eps3d", 1.0e-4)),
+                radius_clip=float(op_config.get("radius_clip", 3.0)),
+                primitive_type=primitive_type,
+                backward_mode=vol_backward_mode,
+            )
+            volume_pkg = voxelizer(
+                gp.means,
+                covars,
+                max_scales,
+                opacity,
+                data_obj.get("vol_ranges"),
+                data_obj.get("vol_centers"),
+                beta=gp.beta,
+                beta_gamma_init=float(op_config.get("beta_gamma_init", 3.5)),
+            )
+            tv_loss = _torch_tv_loss(volume_pkg.volume)
+            vol_loss_total = float(lambda_tv) * tv_loss
+            render_volume = volume_pkg.volume
+        else:
+            tv_loss = torch.zeros((), device=device, dtype=render_pkg.image.dtype)
+            vol_loss_total = tv_loss
+            render_volume = torch.empty(0, device=device, dtype=render_pkg.image.dtype)
+        loss = img_loss + vol_loss_total
+        loss.backward()
+        v_means2d_abs_aux = pop_last_raster_absgrad()
+
+        loss_total = float(loss.detach().item())
+        loss_img = float(img_loss.detach().item())
+        loss_l1 = float(l1_loss.detach().item())
+        loss_dssim = float(dssim_loss.detach().item())
+        loss_tv = float(vol_loss_total.detach().item())
         last_train_metrics = {
             "train/loss_total": loss_total,
             "train/loss_image": loss_img,
@@ -543,9 +793,9 @@ def train(cfg: DictConfig) -> None:
             "train/num_gaussians": float(gp.num_gaussians),
         }
 
-        v_means2d = grad.get_aux("v_means2d")
-        v_means2d_abs = grad.get_aux("v_means2d_abs")
-        radii_2d = grad.get_aux("radii_2d")
+        v_means2d = render_pkg.means2d.grad
+        v_means2d_abs = v_means2d_abs_aux
+        radii_2d = render_pkg.radii
         n_cameras = int(raw_batch["camtoworld"].shape[0])
         if strategy.should_accumulate_grad_stats(step) and v_means2d is not None and radii_2d is not None:
             strategy.accumulate_grad_stats(
@@ -578,21 +828,15 @@ def train(cfg: DictConfig) -> None:
             if changed:
                 skip_optimizer_update = True
                 strategy.reset_grad_accumulator()
-                optimizer.apply_topology_transition(
-                    duplicate_sel=transition.duplicate_sel,
-                    split_keep_parent=transition.split_keep_parent,
-                    split_children=transition.split_children,
-                    prune_keep=transition.prune_keep,
-                    append_new=getattr(transition, "append_new", 0),
-                )
+                _rewrap_gp_after_topology(gp, optimizer, transition)
                 params = gp.to_params()
-                operator.initialize(params)
-                optimizer.params = params
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
 
         if not skip_optimizer_update:
             optimizer.step()
-        optimizer.zero_grad()
+            with torch.no_grad():
+                gp.quats.div_(gp.quats.norm(dim=-1, keepdim=True).clamp_min(1e-12))
+        optimizer.zero_grad(set_to_none=True)
         last_train_metrics["train/num_gaussians"] = float(gp.num_gaussians)
         last_train_metrics["train/skipped_optimizer_update"] = float(skip_optimizer_update)
 

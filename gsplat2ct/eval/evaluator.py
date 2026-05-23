@@ -11,9 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from gsplat2ct.ops.data import Params, Data, Config, ForwardResult
-from gsplat2ct.ops.gs3d_ct_rasterize import GS3DCTRasterizeCUDA
-from gsplat2ct.ops.gs3d_ct_voxelize import GS3DCTVoxelizeCUDA
+from gsplat2ct.ops.data import Params
+from gsplat2ct.ops.torch_autograd import (
+    GaussianMappingVoxelizer,
+    GaussianProjectionRasterizer,
+    activate_gaussian_params,
+)
 from gsplat2ct.eval.metric import metric_proj, metric_vol
 from gsplat2ct.model.opacity import opacity_activation
 
@@ -52,8 +55,6 @@ class ProjectionEvaluator:
         self.ssim_window = ssim_window
         self.primitive_type = str(primitive_type).lower()
         self.beta_gamma_init = float(beta_gamma_init)
-        self._op = GS3DCTRasterizeCUDA()
-        self._op.initialize(params)
 
     @torch.no_grad()
     def evaluate(
@@ -86,40 +87,37 @@ class ProjectionEvaluator:
             gt = batch["image"].contiguous()
 
             viewmats = torch.linalg.inv(c2w).contiguous()
-            C = viewmats.shape[0]
-
-            opacity_raw = self.params.get("opacity").data
-            opacity = opacity_activation(opacity_raw)
-            opacity_2d = opacity.unsqueeze(0).expand(C, -1).contiguous()
-
-            rast_params = Params()
-            rast_params.add_param("means", self.params.get("means"))
-            rast_params.add_param("quats", self.params.get("quats"))
-            rast_params.add_param("scale_ori", self.params.get("scale_ori"))
-            rast_params.add_param("opacity", _ParamWrapper(opacity_2d))
-            if self.params.get("beta") is not None:
-                rast_params.add_param("beta", self.params.get("beta"))
-
-            data_obj = Data()
-            data_obj.set(viewmats=viewmats, Ks=K)
-
             img_h, img_w = gt.shape[1], gt.shape[2]
-            cfg = Config()
-            cfg.set(
-                img_dim1=img_w,
-                img_dim0=img_h,
-                tile_size=16,
-                eps_blur=self.eps_blur,
-                img_radius_clip=1.0 if self.primitive_type == "beta" else 3.0,
+            _quats, _scales, opacity, covars, _max_scales = activate_gaussian_params(
+                self.params.get("quats").data,
+                self.params.get("scale_ori").data,
+                self.params.get("opacity").data,
                 scale_min=self.scale_min,
                 scale_max=self.scale_max,
+            )
+            rasterizer = GaussianProjectionRasterizer(
+                img_w=img_w,
+                img_h=img_h,
+                tile_size=16,
+                eps_blur=self.eps_blur,
+                radius_clip=1.0 if self.primitive_type == "beta" else 3.0,
                 primitive_type=self.primitive_type,
+            )
+            fwd = rasterizer(
+                self.params.get("means").data,
+                covars,
+                opacity,
+                viewmats,
+                K,
+                beta=(
+                    self.params.get("beta").data
+                    if self.params.get("beta") is not None
+                    else None
+                ),
                 beta_gamma_init=self.beta_gamma_init,
             )
-
-            fwd = self._op.forward_only(rast_params, data_obj, cfg)
             # Signed kernels can produce values outside [0, 1]; clamp for evaluation.
-            pred = fwd.outputs["render_output"].clamp(0.0, 1.0)
+            pred = fwd.image.clamp(0.0, 1.0)
 
             gt_squeezed = gt.squeeze(-1)
             m = metric_proj(
@@ -172,8 +170,6 @@ class VolumeEvaluator:
         self.ssim_window = ssim_window
         self.primitive_type = str(primitive_type).lower()
         self.beta_gamma_init = float(beta_gamma_init)
-        self._op = GS3DCTVoxelizeCUDA()
-        self._op.initialize(params)
 
     @torch.no_grad()
     def evaluate(
@@ -195,35 +191,37 @@ class VolumeEvaluator:
 
         W, D, H = volume_shape_wdh
 
-        data_obj = Data()
-        data_obj.set(ranges=ranges, centers=centers)
-
-        cfg = Config()
-        cfg.set(
+        _quats, _scales, opacity, covars, max_scales = activate_gaussian_params(
+            self.params.get("quats").data,
+            self.params.get("scale_ori").data,
+            self.params.get("opacity").data,
+            scale_min=self.scale_min,
+            scale_max=self.scale_max,
+        )
+        voxelizer = GaussianMappingVoxelizer(
             vol_dim2=W,
             vol_dim1=D,
             vol_dim0=H,
-            vol_tile_size=4,
+            tile_size=4,
             eps3d=self.eps3d,
             radius_clip=1.0 if self.primitive_type == "beta" else 3.0,
-            scale_min=self.scale_min,
-            scale_max=self.scale_max,
             primitive_type=self.primitive_type,
+        )
+        fwd = voxelizer(
+            self.params.get("means").data,
+            covars,
+            max_scales,
+            opacity,
+            ranges,
+            centers,
+            beta=(
+                self.params.get("beta").data
+                if self.params.get("beta") is not None
+                else None
+            ),
             beta_gamma_init=self.beta_gamma_init,
         )
-
-        vox_params = Params()
-        vox_params.add_param("means", self.params.get("means"))
-        vox_params.add_param("quats", self.params.get("quats"))
-        vox_params.add_param("scale_ori", self.params.get("scale_ori"))
-        vox_params.add_param(
-            "opacity", _ParamWrapper(opacity_activation(self.params.get("opacity").data))
-        )
-        if self.params.get("beta") is not None:
-            vox_params.add_param("beta", self.params.get("beta"))
-
-        fwd = self._op.forward_only(vox_params, data_obj, cfg)
-        pred_vol = fwd.outputs["render_output"]
+        pred_vol = fwd.volume
 
         if pred_vol.ndim >= 3:
             pred_vol = pred_vol.squeeze()
