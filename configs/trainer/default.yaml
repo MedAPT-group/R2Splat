@@ -17,6 +17,9 @@ angle_unit: "auto"
 # No intermediate checkpoints by default; train.py always saves ckpt_final.pt.
 save_steps: []
 
+# Write one JSONL training-loss record every N steps. Set <=0 to disable.
+loss_log_interval: 50
+
 # Image loss settings: mean L1 + lambda_dssim * (1 - SSIM).
 lambda_l1: 1.0
 lambda_dssim: 0.25

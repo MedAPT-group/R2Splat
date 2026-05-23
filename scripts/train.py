@@ -475,6 +475,11 @@ def train(cfg: DictConfig) -> None:
 
     train_loop_start_time = time.time()
     last_train_metrics: Dict[str, float] = {}
+    loss_log_interval = int(getattr(cfg.trainer, "loss_log_interval", 50))
+    loss_log_path = os.path.join(result_dir, "train_loss_history.jsonl")
+    if loss_log_interval > 0:
+        with open(loss_log_path, "w", encoding="utf-8"):
+            pass
     for step in progress:
         scheduler.step(step, max_steps)
 
@@ -589,6 +594,14 @@ def train(cfg: DictConfig) -> None:
             optimizer.step()
         optimizer.zero_grad()
         last_train_metrics["train/num_gaussians"] = float(gp.num_gaussians)
+        last_train_metrics["train/skipped_optimizer_update"] = float(skip_optimizer_update)
+
+        if loss_log_interval > 0 and (
+            step % loss_log_interval == 0 or step == max_steps - 1
+        ):
+            loss_record = {"step": step, **last_train_metrics}
+            with open(loss_log_path, "a", encoding="utf-8") as fout:
+                fout.write(json.dumps(loss_record) + "\n")
 
         progress.set_postfix(
             total=f"{loss_total:.4f}",
@@ -633,6 +646,7 @@ def train(cfg: DictConfig) -> None:
     final_step = max(0, max_steps - 1)
     gp.update_from_params(params)
     gp.save(os.path.join(ckpt_dir, "ckpt_final.pt"), step=final_step)
+    train_to_checkpoint_elapsed_sec = time.time() - train_start_time
 
     final_metrics: Dict[str, float] = {}
     final_eval_elapsed_sec = 0.0
@@ -661,7 +675,9 @@ def train(cfg: DictConfig) -> None:
         "max_steps": max_steps,
         "final_step": final_step,
         "num_primitives": gp.num_gaussians,
+        "loss_log": loss_log_path if loss_log_interval > 0 else None,
         "timing": {
+            "train_to_checkpoint_sec": train_to_checkpoint_elapsed_sec,
             "setup_train_eval_sec": total_elapsed_sec,
             "train_loop_sec": train_loop_elapsed_sec,
             "final_eval_sec": final_eval_elapsed_sec,

@@ -35,7 +35,10 @@ class CTImageParser:
         with open(meta_path, "r") as f:
             self.meta = json.load(f)
 
-        self.vol_gt_path = os.path.join(data_dir, self.meta["vol"])
+        vol_relpath = self.meta.get("vol", self.meta.get("ct"))
+        if vol_relpath is None:
+            raise KeyError("meta_data.json must contain either 'vol' or 'ct'")
+        self.vol_gt_path = os.path.join(data_dir, vol_relpath)
         self.scanner = self.meta["scanner"]
         self.bbox: Optional[List[List[float]]] = self.meta.get("bbox")
         self.proj_train: List[Dict[str, Any]] = self.meta["proj_train"]
