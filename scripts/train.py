@@ -35,6 +35,7 @@ from gsplat2ct.ops.torch_autograd import (
     GaussianMappingVoxelizer,
     GaussianProjectionRasterizer,
     activate_gaussian_params,
+    activate_uncertainty,
     pop_last_raster_absgrad,
 )
 from gsplat2ct.optim.base import FirstOrderConfig
@@ -177,6 +178,38 @@ def make_train_config(
         scale_max=float(scale_max_world),
         primitive_type=primitive_type,
         beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
+        uncertainty_enabled=bool(getattr(trainer, "uncertainty_enabled", False)),
+        uncertainty_q_min=float(getattr(cfg.model, "uncertainty_q_min", 1.0e-6)),
+        uncertainty_q_max=(
+            None
+            if getattr(cfg.model, "uncertainty_q_max", None) is None
+            else float(getattr(cfg.model, "uncertainty_q_max"))
+        ),
+        uncertainty_init=float(getattr(cfg.model, "init_uncertainty", 0.0025)),
+        uncertainty_var_floor=float(getattr(trainer, "uncertainty_var_floor", 1.0e-6)),
+        uncertainty_var_max=float(getattr(trainer, "uncertainty_var_max", 0.0)),
+        lambda_nll=float(getattr(trainer, "lambda_nll", 0.0)),
+        uncertainty_nll_auto_weight=bool(
+            getattr(trainer, "uncertainty_nll_auto_weight", True)
+        ),
+        uncertainty_nll_auto_min=float(
+            getattr(trainer, "uncertainty_nll_auto_min", 20.0)
+        ),
+        uncertainty_nll_auto_max=float(
+            getattr(trainer, "uncertainty_nll_auto_max", 1000.0)
+        ),
+        lambda_uncertainty_prior=float(
+            getattr(trainer, "lambda_uncertainty_prior", 0.0)
+        ),
+        uncertainty_detach_contribution=bool(
+            getattr(trainer, "uncertainty_detach_contribution", True)
+        ),
+        uncertainty_variance_scale=float(
+            getattr(trainer, "uncertainty_variance_scale", 1.0)
+        ),
+        detector_uncertainty_var=float(
+            getattr(trainer, "detector_uncertainty_var", 0.0)
+        ),
         absgrad=bool(getattr(getattr(cfg, "strategy", None), "absgrad", False)),
         backward_mode=backward_mode,
         img_backward_mode=img_backward_mode,
@@ -292,6 +325,7 @@ def build_optimizer(cfg: DictConfig, params: Params) -> GS3DCTAdamOptimizer:
         "quats": float(cfg.optim.lr_quats),
         "scale_ori": float(cfg.optim.lr_scale_ori),
         "opacity": float(cfg.optim.lr_opacity),
+        "raw_uncertainty": float(getattr(cfg.optim, "lr_uncertainty", cfg.optim.lr_opacity)),
     }
     if params.get("beta") is not None:
         lr_map["beta"] = float(getattr(cfg.optim, "lr_beta", cfg.optim.lr_opacity))
@@ -306,7 +340,7 @@ def build_optimizer(cfg: DictConfig, params: Params) -> GS3DCTAdamOptimizer:
 
 def _wrap_gp_parameters(gp: GaussianParams) -> None:
     """Make Gaussian tensors leaf ``nn.Parameter`` objects for torch optimizers."""
-    for name in ("means", "quats", "scale_ori", "opacity", "beta"):
+    for name in ("means", "quats", "scale_ori", "opacity", "raw_uncertainty", "beta"):
         tensor = getattr(gp, name, None)
         if tensor is None:
             continue
@@ -323,6 +357,11 @@ def _torch_param_groups(cfg: DictConfig, gp: GaussianParams) -> List[Dict[str, A
         {"params": [gp.quats], "lr": float(cfg.optim.lr_quats), "name": "quats"},
         {"params": [gp.scale_ori], "lr": float(cfg.optim.lr_scale_ori), "name": "scale_ori"},
         {"params": [gp.opacity], "lr": float(cfg.optim.lr_opacity), "name": "opacity"},
+        {
+            "params": [gp.raw_uncertainty],
+            "lr": float(getattr(cfg.optim, "lr_uncertainty", cfg.optim.lr_opacity)),
+            "name": "raw_uncertainty",
+        },
     ]
     if gp.beta is not None:
         groups.append(
@@ -427,6 +466,7 @@ def _rewrap_gp_after_topology(
         "quats": gp.quats,
         "scale_ori": gp.scale_ori,
         "opacity": gp.opacity,
+        "raw_uncertainty": gp.raw_uncertainty,
     }
     if gp.beta is not None:
         new_by_name["beta"] = gp.beta
@@ -470,6 +510,219 @@ def _torch_tv_loss(volume: torch.Tensor) -> torch.Tensor:
         + torch.diff(volume, dim=1).abs().sum()
         + torch.diff(volume, dim=2).abs().sum()
     ) / max(int(edge_count), 1)
+
+
+def _projection_laplace_nll(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    variance: torch.Tensor,
+    *,
+    var_floor: float,
+    var_max: float,
+    eps: float = 1.0e-12,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    var = variance + float(var_floor)
+    if float(var_max) > 0.0:
+        var = var.clamp(max=float(var_max))
+    var = var.clamp_min(eps)
+    scale = torch.sqrt(var)
+    residual = target - prediction
+    nll_map = math.sqrt(2.0) * residual.abs() / scale + 0.5 * torch.log(var)
+    weights = math.sqrt(2.0) / scale
+    return nll_map.mean(), weights, var
+
+
+def _variance_scale_tensor(
+    *,
+    base_scale: float,
+    log_std_scale: Optional[torch.Tensor],
+    device: torch.device,
+    dtype: torch.dtype,
+    detach_scale: bool,
+) -> torch.Tensor:
+    scale = torch.as_tensor(float(base_scale), device=device, dtype=dtype)
+    if log_std_scale is not None:
+        dyn = torch.exp(2.0 * log_std_scale.to(device=device, dtype=dtype))
+        if detach_scale:
+            dyn = dyn.detach()
+        scale = scale * dyn
+    return scale
+
+
+def _variance_scale_float(cfg: DictConfig, log_std_scale: Optional[torch.Tensor]) -> float:
+    scale = float(getattr(cfg.trainer, "uncertainty_variance_scale", 1.0))
+    if log_std_scale is not None:
+        tau = float(torch.exp(log_std_scale.detach()).item())
+        scale *= tau * tau
+    return scale
+
+
+def _select_evenly_spaced_view_indices(
+    angles_rad: torch.Tensor,
+    count: int,
+) -> torch.Tensor:
+    num_views = int(angles_rad.numel())
+    count = min(max(int(count), 0), max(num_views - 1, 0))
+    if count <= 0:
+        return torch.empty(0, device=angles_rad.device, dtype=torch.long)
+
+    order = torch.argsort(torch.remainder(angles_rad, 2.0 * math.pi))
+    pos = (
+        (torch.arange(count, device=angles_rad.device, dtype=torch.float32) + 0.5)
+        * float(num_views)
+        / float(count)
+    )
+    pos = pos.floor().to(torch.long).clamp(max=num_views - 1)
+    return order.index_select(0, pos).unique(sorted=True)
+
+
+def _build_calibration_optimizer(
+    cfg: DictConfig,
+    gp: GaussianParams,
+    mode: str,
+    log_std_scale: Optional[nn.Parameter],
+) -> Optional[torch.optim.Optimizer]:
+    if mode == "uncertainty":
+        return torch.optim.Adam(
+            [gp.raw_uncertainty],
+            lr=float(getattr(cfg.trainer, "calibration_lr_uncertainty", 1.0e-4)),
+            betas=(float(cfg.optim.beta1), float(cfg.optim.beta2)),
+            eps=float(cfg.optim.eps),
+        )
+    if mode == "global_scale":
+        if log_std_scale is None:
+            raise ValueError("global_scale calibration requires log_std_scale")
+        return torch.optim.Adam(
+            [log_std_scale],
+            lr=float(getattr(cfg.trainer, "calibration_lr_scale", 1.0e-2)),
+            betas=(float(cfg.optim.beta1), float(cfg.optim.beta2)),
+            eps=float(cfg.optim.eps),
+        )
+    return None
+
+
+def _run_projection_calibration_step(
+    *,
+    cfg: DictConfig,
+    gp: GaussianParams,
+    raw_batch: Dict[str, torch.Tensor],
+    op_config: Config,
+    scale_min_world: float,
+    scale_max_world: float,
+    calibration_mode: str,
+    calibration_optimizer: torch.optim.Optimizer,
+    calibration_log_std_scale: Optional[nn.Parameter],
+    device: torch.device,
+) -> Dict[str, float]:
+    calibration_optimizer.zero_grad(set_to_none=True)
+
+    img_tensor = raw_batch["image"]
+    img_h, img_w = int(img_tensor.shape[1]), int(img_tensor.shape[2])
+    data_obj = make_train_data(
+        raw_batch,
+        vol_ranges=torch.ones(3, device=device),
+        vol_centers=torch.zeros(3, device=device),
+        device=device,
+    )
+
+    with torch.set_grad_enabled(calibration_mode == "uncertainty"):
+        _quats, _scales, opacity, covars, _max_scales = activate_gaussian_params(
+            gp.quats,
+            gp.scale_ori,
+            gp.opacity,
+            scale_min=scale_min_world,
+            scale_max=scale_max_world,
+        )
+        q = activate_uncertainty(
+            gp.raw_uncertainty,
+            q_min=float(op_config.get("uncertainty_q_min", 1.0e-6)),
+            q_max=op_config.get("uncertainty_q_max", None),
+        )
+
+        if calibration_mode == "global_scale":
+            q = q.detach()
+        primitive_type = str(getattr(cfg.model, "primitive_type", "gaussian")).lower()
+        rasterizer = GaussianProjectionRasterizer(
+            img_w=img_w,
+            img_h=img_h,
+            tile_size=int(op_config.get("img_tile_size", 16)),
+            eps_blur=float(op_config.get("eps_blur", 0.3)),
+            radius_clip=float(op_config.get("img_radius_clip", 3.0)),
+            primitive_type=primitive_type,
+            absgrad=False,
+            backward_mode=str(op_config.get("img_backward_mode", op_config.get("backward_mode", "primitive"))),
+            uncertainty_detach_contribution=True,
+        )
+        fwd = rasterizer(
+            gp.means.detach(),
+            covars.detach(),
+            opacity.detach(),
+            data_obj.get("viewmats"),
+            data_obj.get("Ks"),
+            beta=gp.beta.detach() if gp.beta is not None else None,
+            beta_gamma_init=float(op_config.get("beta_gamma_init", 3.5)),
+            uncertainty=q,
+        )
+
+    if fwd.variance is None:
+        raise RuntimeError("Calibration requires uncertainty variance")
+
+    variance_scale = _variance_scale_tensor(
+        base_scale=float(op_config.get("uncertainty_variance_scale", 1.0)),
+        log_std_scale=calibration_log_std_scale,
+        device=device,
+        dtype=fwd.variance.dtype,
+        detach_scale=(calibration_mode != "global_scale"),
+    )
+    projection_variance = fwd.variance.detach() if calibration_mode == "global_scale" else fwd.variance
+    projection_variance = projection_variance * variance_scale
+    detector_var = float(op_config.get("detector_uncertainty_var", 0.0))
+    if detector_var != 0.0:
+        projection_variance = projection_variance + detector_var
+    nll_loss, _nll_weights, _var_used = _projection_laplace_nll(
+        fwd.image.detach(),
+        data_obj.get("targets"),
+        projection_variance,
+        var_floor=float(op_config.get("uncertainty_var_floor", 1.0e-6)),
+        var_max=float(op_config.get("uncertainty_var_max", 0.0)),
+    )
+    nll_loss.backward()
+    calibration_optimizer.step()
+
+    if calibration_log_std_scale is not None:
+        min_scale = float(getattr(cfg.trainer, "calibration_scale_min", 0.05))
+        max_scale = float(getattr(cfg.trainer, "calibration_scale_max", 20.0))
+        with torch.no_grad():
+            calibration_log_std_scale.clamp_(
+                min=math.log(max(min_scale, 1.0e-12)),
+                max=math.log(max(max_scale, min_scale + 1.0e-12)),
+            )
+
+    calibration_optimizer.zero_grad(set_to_none=True)
+    if gp.raw_uncertainty.grad is not None:
+        gp.raw_uncertainty.grad = None
+
+    out = {
+        "calibration/loss_nll": float(nll_loss.detach().item()),
+        "calibration/num_views": float(raw_batch["image_id"].numel()),
+    }
+    if calibration_log_std_scale is not None:
+        tau = float(torch.exp(calibration_log_std_scale.detach()).item())
+        out["calibration/std_scale"] = tau
+        out["calibration/variance_scale"] = tau * tau * float(
+            op_config.get("uncertainty_variance_scale", 1.0)
+        )
+    return out
+
+
+def _uncertainty_log_prior(
+    q: torch.Tensor,
+    *,
+    q0: float,
+    eps: float = 1.0e-12,
+) -> torch.Tensor:
+    target = math.log(max(float(q0), eps))
+    return (torch.log(q.clamp_min(eps)) - target).square().mean()
 
 
 def train(cfg: DictConfig) -> None:
@@ -558,6 +811,8 @@ def train(cfg: DictConfig) -> None:
             bbox=bbox,
             primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
             beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
+            init_uncertainty=float(getattr(cfg.model, "init_uncertainty", 0.0025)),
+            uncertainty_q_min=float(getattr(cfg.model, "uncertainty_q_min", 1.0e-6)),
             device=str(device),
         )
     elif init_source == "file":
@@ -571,6 +826,8 @@ def train(cfg: DictConfig) -> None:
             bbox=bbox,
             primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
             beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
+            init_uncertainty=float(getattr(cfg.model, "init_uncertainty", 0.0025)),
+            uncertainty_q_min=float(getattr(cfg.model, "uncertainty_q_min", 1.0e-6)),
             device=str(device),
         )
     else:
@@ -587,6 +844,16 @@ def train(cfg: DictConfig) -> None:
     print("[4/5] Creating torch Adam optimizer...")
     optimizer = build_torch_optimizer(cfg, gp)
     base_lrs = {str(group["name"]): float(group["lr"]) for group in optimizer.param_groups}
+
+    calibration_log_std_scale: Optional[nn.Parameter] = None
+    if str(getattr(cfg.trainer, "calibration_mode", "none")).lower() == "global_scale":
+        calibration_log_std_scale = nn.Parameter(
+            torch.tensor(
+                math.log(max(float(getattr(cfg.trainer, "calibration_scale_init", 1.0)), 1.0e-12)),
+                device=device,
+                dtype=gp.means.dtype,
+            )
+        )
 
     from gsplat2ct.strategy import build_strategy
 
@@ -615,13 +882,50 @@ def train(cfg: DictConfig) -> None:
         device=device,
     )
     angle_values_rad = _angles_to_radians(angle_values, angle_unit)
+    calibration_mode = str(getattr(cfg.trainer, "calibration_mode", "none")).lower()
+    if calibration_mode not in {"none", "uncertainty", "global_scale"}:
+        raise ValueError(
+            "trainer.calibration_mode must be one of "
+            "['none', 'uncertainty', 'global_scale']"
+        )
+    calibration_enabled = (
+        calibration_mode != "none"
+        and bool(getattr(cfg.trainer, "uncertainty_enabled", False))
+        and int(getattr(cfg.trainer, "calibration_num_views", 0)) > 0
+        and int(getattr(cfg.trainer, "calibration_interval", 0)) > 0
+    )
+    all_train_indices = torch.arange(num_views, device=device, dtype=torch.long)
+    calibration_indices = torch.empty(0, device=device, dtype=torch.long)
+    if calibration_enabled:
+        calibration_indices = _select_evenly_spaced_view_indices(
+            angle_values_rad,
+            int(getattr(cfg.trainer, "calibration_num_views", 0)),
+        )
+    train_mask = torch.ones(num_views, device=device, dtype=torch.bool)
+    if calibration_indices.numel() > 0:
+        train_mask[calibration_indices] = False
+    train_candidate_indices = all_train_indices[train_mask]
+    if train_candidate_indices.numel() == 0:
+        raise RuntimeError("Calibration split left no reconstruction training views")
+    train_angle_values_rad = angle_values_rad.index_select(0, train_candidate_indices)
     print(
         "   View sampling: "
-        f"strategy={angle_strategy}, batch_size={batch_size}, angle_unit={angle_unit}"
+        f"strategy={angle_strategy}, batch_size={batch_size}, angle_unit={angle_unit}, "
+        f"train_views={int(train_candidate_indices.numel())}, "
+        f"calibration_views={int(calibration_indices.numel())}"
     )
+    if calibration_indices.numel() > 0:
+        print(f"   Calibration indices: {calibration_indices.detach().cpu().tolist()}")
 
-    shuffle_perm = torch.randperm(num_views, device=device)
+    shuffle_perm = torch.randperm(int(train_candidate_indices.numel()), device=device)
     perm_cursor = 0
+    calibration_optimizer = (
+        _build_calibration_optimizer(
+            cfg, gp, calibration_mode, calibration_log_std_scale
+        )
+        if calibration_enabled
+        else None
+    )
     progress = tqdm(range(max_steps), desc="Training")
 
     if bool(getattr(cfg.trainer, "eval_at_start", True)):
@@ -637,6 +941,9 @@ def train(cfg: DictConfig) -> None:
             step=0,
             scale_min_world=scale_min_world,
             scale_max_world=scale_max_world,
+            uncertainty_variance_scale=_variance_scale_float(
+                cfg, calibration_log_std_scale
+            ),
         )
 
     train_loop_start_time = time.time()
@@ -650,17 +957,19 @@ def train(cfg: DictConfig) -> None:
         _set_torch_optimizer_lrs(optimizer, base_lrs, cfg, step, max_steps)
 
         if angle_strategy == "random" or batch_size <= 1:
-            batch_indices, shuffle_perm, perm_cursor = _sample_random_batch_indices(
-                num_views=num_views,
+            batch_positions, shuffle_perm, perm_cursor = _sample_random_batch_indices(
+                num_views=int(train_candidate_indices.numel()),
                 batch_size=batch_size,
                 shuffle_perm=shuffle_perm,
                 perm_cursor=perm_cursor,
                 device=device,
             )
+            batch_indices = train_candidate_indices.index_select(0, batch_positions)
         else:
-            batch_indices = _sample_evenly_spaced_angle_batch_indices(
-                angle_values_rad, batch_size
+            batch_positions = _sample_evenly_spaced_angle_batch_indices(
+                train_angle_values_rad, batch_size
             )
+            batch_indices = train_candidate_indices.index_select(0, batch_positions)
 
         raw_batch = trainset.get_batch(batch_indices)
         img_tensor = raw_batch["image"]
@@ -705,6 +1014,14 @@ def train(cfg: DictConfig) -> None:
             scale_min=scale_min_world,
             scale_max=scale_max_world,
         )
+        uncertainty_enabled = bool(op_config.get("uncertainty_enabled", False))
+        q = None
+        if uncertainty_enabled:
+            q = activate_uncertainty(
+                gp.raw_uncertainty,
+                q_min=float(op_config.get("uncertainty_q_min", 1.0e-6)),
+                q_max=op_config.get("uncertainty_q_max", None),
+            )
         primitive_type = str(getattr(cfg.model, "primitive_type", "gaussian")).lower()
         img_backward_mode = str(
             op_config.get("img_backward_mode", op_config.get("backward_mode", "pixel"))
@@ -721,6 +1038,9 @@ def train(cfg: DictConfig) -> None:
             primitive_type=primitive_type,
             absgrad=bool(op_config.get("absgrad", False)),
             backward_mode=img_backward_mode,
+            uncertainty_detach_contribution=bool(
+                op_config.get("uncertainty_detach_contribution", True)
+            ),
         )
         render_pkg = rasterizer(
             gp.means,
@@ -730,12 +1050,15 @@ def train(cfg: DictConfig) -> None:
             data_obj.get("Ks"),
             beta=gp.beta,
             beta_gamma_init=float(op_config.get("beta_gamma_init", 3.5)),
+            uncertainty=q,
         )
         if render_pkg.means2d.requires_grad:
             render_pkg.means2d.retain_grad()
 
         l1_loss = (render_pkg.image - data_obj.get("targets")).abs().mean()
-        if float(op_config.get("lambda_dssim", 0.0)) > 0.0:
+        lambda_l1_loss = float(op_config.get("lambda_l1", 1.0))
+        lambda_dssim_loss = float(op_config.get("lambda_dssim", 0.0))
+        if lambda_dssim_loss > 0.0:
             dssim_loss = 1.0 - ssim2d(
                 render_pkg.image.unsqueeze(1),
                 data_obj.get("targets").unsqueeze(1),
@@ -743,9 +1066,52 @@ def train(cfg: DictConfig) -> None:
             )
         else:
             dssim_loss = torch.zeros((), device=device, dtype=render_pkg.image.dtype)
-        img_loss = float(op_config.get("lambda_l1", 1.0)) * l1_loss + float(
-            op_config.get("lambda_dssim", 0.0)
-        ) * dssim_loss
+        nll_loss = torch.zeros((), device=device, dtype=render_pkg.image.dtype)
+        q_prior_loss = torch.zeros((), device=device, dtype=render_pkg.image.dtype)
+        lambda_nll_eff = 0.0
+        if uncertainty_enabled:
+            if render_pkg.variance is None:
+                raise RuntimeError("uncertainty_enabled=True but rasterizer did not return variance")
+            detector_var = float(op_config.get("detector_uncertainty_var", 0.0))
+            projection_variance = render_pkg.variance * _variance_scale_tensor(
+                base_scale=float(op_config.get("uncertainty_variance_scale", 1.0)),
+                log_std_scale=calibration_log_std_scale,
+                device=device,
+                dtype=render_pkg.variance.dtype,
+                detach_scale=True,
+            )
+            if detector_var != 0.0:
+                projection_variance = projection_variance + detector_var
+            nll_loss, nll_weights, _var_used = _projection_laplace_nll(
+                render_pkg.image,
+                data_obj.get("targets"),
+                projection_variance,
+                var_floor=float(op_config.get("uncertainty_var_floor", 1.0e-6)),
+                var_max=float(op_config.get("uncertainty_var_max", 0.0)),
+            )
+            lambda_nll = float(op_config.get("lambda_nll", 0.0))
+            if bool(op_config.get("uncertainty_nll_auto_weight", True)) and lambda_nll != 0.0:
+                denom = nll_weights.detach().mean().clamp(
+                    min=float(op_config.get("uncertainty_nll_auto_min", 20.0)),
+                    max=float(op_config.get("uncertainty_nll_auto_max", 1000.0)),
+                )
+                lambda_nll_eff = float(lambda_nll / denom.item())
+            else:
+                lambda_nll_eff = lambda_nll
+            if q is None:
+                raise RuntimeError("Internal error: q is None while uncertainty is enabled")
+            if q is not None:
+                q_prior_loss = _uncertainty_log_prior(
+                    q,
+                    q0=float(op_config.get("uncertainty_init", 0.0025)),
+                )
+
+        img_loss = (
+            lambda_l1_loss * l1_loss
+            + lambda_dssim_loss * dssim_loss
+            + float(lambda_nll_eff) * nll_loss
+            + float(op_config.get("lambda_uncertainty_prior", 0.0)) * q_prior_loss
+        )
 
         if lambda_tv > 0.0:
             voxelizer = GaussianMappingVoxelizer(
@@ -757,6 +1123,9 @@ def train(cfg: DictConfig) -> None:
                 radius_clip=float(op_config.get("radius_clip", 3.0)),
                 primitive_type=primitive_type,
                 backward_mode=vol_backward_mode,
+                uncertainty_detach_contribution=bool(
+                    op_config.get("uncertainty_detach_contribution", True)
+                ),
             )
             volume_pkg = voxelizer(
                 gp.means,
@@ -789,9 +1158,32 @@ def train(cfg: DictConfig) -> None:
             "train/loss_image": loss_img,
             "train/loss_l1": loss_l1,
             "train/loss_dssim": loss_dssim,
+            "train/loss_nll": float(nll_loss.detach().item()),
+            "train/loss_uncertainty_prior": float(q_prior_loss.detach().item()),
+            "train/lambda_nll_eff": float(lambda_nll_eff),
             "train/loss_tv": loss_tv,
             "train/num_gaussians": float(gp.num_gaussians),
         }
+        if q is not None:
+            q_det = q.detach()
+            last_train_metrics.update(
+                {
+                    "train/q_min": float(q_det.min().item()),
+                    "train/q_median": float(q_det.median().item()),
+                    "train/q_mean": float(q_det.mean().item()),
+                    "train/q_max": float(q_det.max().item()),
+                }
+            )
+        if uncertainty_enabled:
+            last_train_metrics["train/detector_uncertainty_var"] = float(
+                op_config.get("detector_uncertainty_var", 0.0)
+            )
+            variance_scale_log = float(op_config.get("uncertainty_variance_scale", 1.0))
+            if calibration_log_std_scale is not None:
+                tau_log = float(torch.exp(calibration_log_std_scale.detach()).item())
+                last_train_metrics["train/uncertainty_std_scale"] = tau_log
+                variance_scale_log *= tau_log * tau_log
+            last_train_metrics["train/uncertainty_variance_scale"] = variance_scale_log
 
         v_means2d = render_pkg.means2d.grad
         v_means2d_abs = v_means2d_abs_aux
@@ -816,6 +1208,7 @@ def train(cfg: DictConfig) -> None:
                 scale_min=scale_min_world,
                 scale_max=scale_max_world,
                 grow_scale3d_abs=grow_scale3d_abs,
+                uncertainty=q.detach() if q is not None else None,
             )
             changed, transition = strategy.apply(
                 gp,
@@ -829,6 +1222,10 @@ def train(cfg: DictConfig) -> None:
                 skip_optimizer_update = True
                 strategy.reset_grad_accumulator()
                 _rewrap_gp_after_topology(gp, optimizer, transition)
+                if calibration_enabled and calibration_mode == "uncertainty":
+                    calibration_optimizer = _build_calibration_optimizer(
+                        cfg, gp, calibration_mode, calibration_log_std_scale
+                    )
                 params = gp.to_params()
                 optimizer.zero_grad(set_to_none=True)
 
@@ -837,6 +1234,56 @@ def train(cfg: DictConfig) -> None:
             with torch.no_grad():
                 gp.quats.div_(gp.quats.norm(dim=-1, keepdim=True).clamp_min(1e-12))
         optimizer.zero_grad(set_to_none=True)
+
+        calibration_interval = int(getattr(cfg.trainer, "calibration_interval", 0))
+        calibration_start_iter = int(getattr(cfg.trainer, "calibration_start_iter", 0))
+        if (
+            calibration_enabled
+            and calibration_optimizer is not None
+            and calibration_interval > 0
+            and step >= calibration_start_iter
+            and step % calibration_interval == 0
+        ):
+            calibration_batch_size = int(getattr(cfg.trainer, "calibration_batch_size", 0))
+            if calibration_batch_size > 0 and calibration_batch_size < int(calibration_indices.numel()):
+                perm = torch.randperm(int(calibration_indices.numel()), device=device)
+                cal_indices = calibration_indices.index_select(0, perm[:calibration_batch_size])
+            else:
+                cal_indices = calibration_indices
+            calibration_metrics = _run_projection_calibration_step(
+                cfg=cfg,
+                gp=gp,
+                raw_batch=trainset.get_batch(cal_indices),
+                op_config=op_config,
+                scale_min_world=scale_min_world,
+                scale_max_world=scale_max_world,
+                calibration_mode=calibration_mode,
+                calibration_optimizer=calibration_optimizer,
+                calibration_log_std_scale=calibration_log_std_scale,
+                device=device,
+            )
+            last_train_metrics.update(calibration_metrics)
+            if q is not None and calibration_mode == "uncertainty":
+                q_cal = activate_uncertainty(
+                    gp.raw_uncertainty,
+                    q_min=float(op_config.get("uncertainty_q_min", 1.0e-6)),
+                    q_max=op_config.get("uncertainty_q_max", None),
+                ).detach()
+                last_train_metrics.update(
+                    {
+                        "train/q_min": float(q_cal.min().item()),
+                        "train/q_median": float(q_cal.median().item()),
+                        "train/q_mean": float(q_cal.mean().item()),
+                        "train/q_max": float(q_cal.max().item()),
+                    }
+                )
+            if calibration_log_std_scale is not None:
+                tau = float(torch.exp(calibration_log_std_scale.detach()).item())
+                last_train_metrics["train/uncertainty_std_scale"] = tau
+                last_train_metrics["train/uncertainty_variance_scale"] = (
+                    tau * tau * float(op_config.get("uncertainty_variance_scale", 1.0))
+                )
+
         last_train_metrics["train/num_gaussians"] = float(gp.num_gaussians)
         last_train_metrics["train/skipped_optimizer_update"] = float(skip_optimizer_update)
 
@@ -851,6 +1298,7 @@ def train(cfg: DictConfig) -> None:
             total=f"{loss_total:.4f}",
             img=f"{loss_img:.4f}",
             l1=f"{loss_l1:.4f}",
+            nll=f"{float(nll_loss.detach().item()):.4f}",
             dssim=f"{loss_dssim:.4f}",
             tv=f"{loss_tv:.4f}",
             N=gp.num_gaussians,
@@ -879,6 +1327,9 @@ def train(cfg: DictConfig) -> None:
                 step,
                 scale_min_world=scale_min_world,
                 scale_max_world=scale_max_world,
+                uncertainty_variance_scale=_variance_scale_float(
+                    cfg, calibration_log_std_scale
+                ),
             )
 
         if step in cfg.trainer.save_steps:
@@ -908,6 +1359,9 @@ def train(cfg: DictConfig) -> None:
             step=final_step,
             scale_min_world=scale_min_world,
             scale_max_world=scale_max_world,
+            uncertainty_variance_scale=_variance_scale_float(
+                cfg, calibration_log_std_scale
+            ),
         )
         final_eval_elapsed_sec = time.time() - eval_start_time
 
@@ -920,6 +1374,14 @@ def train(cfg: DictConfig) -> None:
         "final_step": final_step,
         "num_primitives": gp.num_gaussians,
         "loss_log": loss_log_path if loss_log_interval > 0 else None,
+        "uncertainty_variance_scale": _variance_scale_float(
+            cfg, calibration_log_std_scale
+        ),
+        "uncertainty_std_scale": (
+            float(torch.exp(calibration_log_std_scale.detach()).item())
+            if calibration_log_std_scale is not None
+            else math.sqrt(float(getattr(cfg.trainer, "uncertainty_variance_scale", 1.0)))
+        ),
         "timing": {
             "train_to_checkpoint_sec": train_to_checkpoint_elapsed_sec,
             "setup_train_eval_sec": total_elapsed_sec,
@@ -968,8 +1430,13 @@ def _run_eval(
     *,
     scale_min_world: float,
     scale_max_world: float,
+    uncertainty_variance_scale: Optional[float] = None,
 ) -> Dict[str, float]:
     log_dict: Dict[str, float] = {}
+    if uncertainty_variance_scale is None:
+        uncertainty_variance_scale = float(
+            getattr(cfg.trainer, "uncertainty_variance_scale", 1.0)
+        )
 
     proj_eval = ProjectionEvaluator(
         params,
@@ -979,6 +1446,20 @@ def _run_eval(
         ssim_window=int(getattr(cfg.trainer, "ssim_window", 11)),
         primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
         beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
+        uncertainty_enabled=bool(getattr(cfg.trainer, "uncertainty_enabled", False)),
+        uncertainty_q_min=float(getattr(cfg.model, "uncertainty_q_min", 1.0e-6)),
+        uncertainty_q_max=(
+            None
+            if getattr(cfg.model, "uncertainty_q_max", None) is None
+            else float(getattr(cfg.model, "uncertainty_q_max"))
+        ),
+        uncertainty_var_floor=float(
+            getattr(cfg.trainer, "uncertainty_var_floor", 1.0e-6)
+        ),
+        uncertainty_variance_scale=float(uncertainty_variance_scale),
+        detector_uncertainty_var=float(
+            getattr(cfg.trainer, "detector_uncertainty_var", 0.0)
+        ),
     )
     proj_metrics, vis_pairs = proj_eval.evaluate(evalset, device)
     print(
@@ -991,6 +1472,14 @@ def _run_eval(
         "img_metrics/psnr": float(proj_metrics["psnr"]),
         "img_metrics/ssim": float(proj_metrics["ssim"]),
     })
+    if "uncertainty_error_corr" in proj_metrics:
+        log_dict["img_uncertainty/error_corr"] = float(
+            proj_metrics["uncertainty_error_corr"]
+        )
+    if "uncertainty_std_mean" in proj_metrics:
+        log_dict["img_uncertainty/std_mean"] = float(
+            proj_metrics["uncertainty_std_mean"]
+        )
 
     vis_cfg = getattr(cfg, "vis", None)
     if vis_pairs and bool(getattr(vis_cfg, "save_projection_comparison", False)):
@@ -1009,6 +1498,17 @@ def _run_eval(
             ssim_window=int(getattr(cfg.trainer, "ssim_window", 11)),
             primitive_type=str(getattr(cfg.model, "primitive_type", "gaussian")),
             beta_gamma_init=float(getattr(cfg.model, "beta_gamma_init", 3.5)),
+            uncertainty_enabled=bool(getattr(cfg.trainer, "uncertainty_enabled", False)),
+            uncertainty_q_min=float(getattr(cfg.model, "uncertainty_q_min", 1.0e-6)),
+            uncertainty_q_max=(
+                None
+                if getattr(cfg.model, "uncertainty_q_max", None) is None
+                else float(getattr(cfg.model, "uncertainty_q_max"))
+            ),
+            uncertainty_var_floor=float(
+                getattr(cfg.trainer, "uncertainty_var_floor", 1.0e-6)
+            ),
+            uncertainty_variance_scale=float(uncertainty_variance_scale),
         )
         vol_metrics, pred_vol = vol_eval.evaluate(vol_gt, bbox, volume_shape_wdh, device)
         print(
@@ -1023,6 +1523,14 @@ def _run_eval(
             "vol_metrics/ssim": float(vol_metrics["ssim"]),
             "vol/psnr": float(vol_metrics["psnr"]),
         })
+        if "uncertainty_error_corr" in vol_metrics:
+            log_dict["vol_uncertainty/error_corr"] = float(
+                vol_metrics["uncertainty_error_corr"]
+            )
+        if "uncertainty_std_mean" in vol_metrics:
+            log_dict["vol_uncertainty/std_mean"] = float(
+                vol_metrics["uncertainty_std_mean"]
+            )
         if bool(getattr(vis_cfg, "save_volume_comparison", False)):
             save_volume_comparison(
                 pred_vol,

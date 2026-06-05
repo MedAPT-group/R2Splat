@@ -37,6 +37,7 @@ from typing import Optional
 from ..model.beta import activated_beta_terms
 from .base import ForwardBackwardBase
 from .data import Config, Data, ForwardResult, Params
+from .torch_autograd import activate_uncertainty
 
 
 class GS3DCTRasterizeCUDA(ForwardBackwardBase):
@@ -72,7 +73,9 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
             world_to_image_projection_fwd,
             conics_mu_fwd,
             isect_tiles, isect_offset_encode,
+            beta_rasterize_to_pixels_mean_var_fwd,
             beta_rasterize_to_pixels_fwd,
+            rasterize_to_pixels_mean_var_fwd,
             rasterize_to_pixels_fwd,
         )
 
@@ -80,6 +83,10 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         quats = params.get('quats').data
         scale_ori = params.get('scale_ori').data
         opacity = params.get('opacity').data
+        raw_uncertainty_param = params.get('raw_uncertainty')
+        raw_uncertainty = (
+            raw_uncertainty_param.data if raw_uncertainty_param is not None else None
+        )
         beta_param = params.get('beta')
         beta = beta_param.data if beta_param is not None else None
 
@@ -108,6 +115,9 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         primitive_type = str(config.get('primitive_type', 'beta' if beta is not None else 'gaussian')).lower()
         beta_gamma_init = config.get('beta_gamma_init', 3.5)
         img_radius_clip = config.get('img_radius_clip', 1.0 if primitive_type == "beta" else 3.0)
+        uncertainty_enabled = bool(config.get("uncertainty_enabled", False))
+        uncertainty_q_min = float(config.get("uncertainty_q_min", 1.0e-6))
+        uncertainty_q_max = config.get("uncertainty_q_max", None)
 
         # Stage 0: ParameterTransform
         covars, _max_scales = parameter_transform_fwd(
@@ -145,7 +155,28 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
         )
 
         # Stage 4: RasterizeToPixels
-        if primitive_type == "beta":
+        render_var = None
+        if uncertainty_enabled:
+            if raw_uncertainty is None:
+                raise ValueError("uncertainty_enabled=True requires raw_uncertainty")
+            q = activate_uncertainty(
+                raw_uncertainty,
+                q_min=uncertainty_q_min,
+                q_max=uncertainty_q_max,
+            )
+            if primitive_type == "beta":
+                render_output, render_var = beta_rasterize_to_pixels_mean_var_fwd(
+                    means2d, conics, opacity, mus_render, betas_2d, q,
+                    tile_offsets, flatten_ids,
+                    img_dim1, img_dim0, tile_size
+                )
+            else:
+                render_output, render_var = rasterize_to_pixels_mean_var_fwd(
+                    means2d, conics, opacity, mus_render, q,
+                    tile_offsets, flatten_ids,
+                    img_dim1, img_dim0, tile_size
+                )
+        elif primitive_type == "beta":
             render_output = beta_rasterize_to_pixels_fwd(
                 means2d, conics, opacity, mus_render, betas_2d,
                 tile_offsets, flatten_ids,
@@ -158,10 +189,11 @@ class GS3DCTRasterizeCUDA(ForwardBackwardBase):
                 img_dim1, img_dim0, tile_size
             )
 
-        return ForwardResult(
-            outputs={'render_output': render_output},
-            intermediates={}
-        )
+        outputs = {'render_output': render_output}
+        if render_var is not None:
+            outputs['render_output_var'] = render_var
+            outputs['render_output_std'] = render_var.clamp_min(0).sqrt()
+        return ForwardResult(outputs=outputs, intermediates={})
 
     def forward_backward1(self, params, data, config=None):
         raise NotImplementedError("GS3DCTRasterizeCUDA is forward-only")

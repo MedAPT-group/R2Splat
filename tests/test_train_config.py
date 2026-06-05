@@ -10,12 +10,24 @@ def _cfg(primitive_type: str):
             "model": {
                 "primitive_type": primitive_type,
                 "beta_gamma_init": 3.5,
+                "init_uncertainty": 0.0025,
+                "uncertainty_q_min": 1.0e-6,
+                "uncertainty_q_max": 0.1,
             },
             "trainer": {
                 "img_tile_size": 16,
                 "eps_blur": 1.0e-8,
                 "lambda_l1": 1.0,
                 "lambda_dssim": 0.25,
+                "uncertainty_enabled": True,
+                "lambda_nll": 0.003,
+                "lambda_uncertainty_prior": 0.0001,
+                "uncertainty_var_floor": 1.0e-6,
+                "uncertainty_var_max": 0.1,
+                "uncertainty_nll_auto_weight": True,
+                "uncertainty_detach_contribution": True,
+                "uncertainty_variance_scale": 2.0,
+                "detector_uncertainty_var": 3.0e-6,
                 "ssim_window": 11,
                 "vol_tile_size": 8,
                 "eps3d": 1.0e-8,
@@ -89,3 +101,23 @@ def test_train_config_rejects_ambiguous_gaussian_backward_mode():
             scale_min_world=0.001,
             scale_max_world=1.0,
         )
+
+
+def test_train_config_passes_uncertainty_options():
+    cfg = _cfg("gaussian")
+
+    op_cfg = make_train_config(
+        cfg,
+        img_shape=(32, 32),
+        vol_dims=(8, 8, 8),
+        scale_min_world=0.001,
+        scale_max_world=1.0,
+    )
+
+    assert op_cfg.get("uncertainty_enabled") is True
+    assert op_cfg.get("lambda_nll") == 0.003
+    assert op_cfg.get("uncertainty_q_min") == 1.0e-6
+    assert op_cfg.get("uncertainty_q_max") == 0.1
+    assert op_cfg.get("uncertainty_detach_contribution") is True
+    assert op_cfg.get("uncertainty_variance_scale") == 2.0
+    assert op_cfg.get("detector_uncertainty_var") == 3.0e-6

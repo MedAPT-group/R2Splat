@@ -83,6 +83,18 @@ torch::Tensor voxelize_to_voxels_fwd_tensor(
     const uint32_t dim0,
     const uint32_t tile_size);
 
+std::tuple<torch::Tensor, torch::Tensor> voxelize_to_voxels_mean_var_fwd_tensor(
+    const torch::Tensor& means3d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& uncertainties,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 voxelize_to_voxels_bwd_tensor(
     const torch::Tensor& means3d,
@@ -110,11 +122,41 @@ voxelize_to_voxels_bwd_per_gaussian_tensor(
     const uint32_t dim0,
     const uint32_t tile_size);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+voxelize_to_voxels_mean_var_bwd_per_gaussian_tensor(
+    const torch::Tensor& means3d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& isect_ids,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_output,
+    const torch::Tensor& v_render_var,
+    const torch::Tensor& uncertainties,
+    const bool detach_var_contribution,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
 torch::Tensor beta_voxelize_to_voxels_fwd_tensor(
     const torch::Tensor& means3d,
     const torch::Tensor& conics,
     const torch::Tensor& opacities,
     const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
+std::tuple<torch::Tensor, torch::Tensor> beta_voxelize_to_voxels_mean_var_fwd_tensor(
+    const torch::Tensor& means3d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& betas,
+    const torch::Tensor& uncertainties,
     const torch::Tensor& tile_offsets,
     const torch::Tensor& flatten_ids,
     const uint32_t dim2,
@@ -151,6 +193,24 @@ beta_voxelize_to_voxels_bwd_per_gaussian_tensor(
     const uint32_t dim0,
     const uint32_t tile_size);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+beta_voxelize_to_voxels_mean_var_bwd_per_gaussian_tensor(
+    const torch::Tensor& means3d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& isect_ids,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_output,
+    const torch::Tensor& v_render_var,
+    const torch::Tensor& uncertainties,
+    const bool detach_var_contribution,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
 std::tuple<torch::Tensor, torch::Tensor>
 conics_mu_fwd_tensor(
     const torch::Tensor& cov2d_3x3,
@@ -171,6 +231,30 @@ torch::Tensor rasterize_to_pixels_fwd_tensor(
     const torch::Tensor& mus,
     const torch::Tensor& tile_offsets,
     const torch::Tensor& flatten_ids,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
+std::tuple<torch::Tensor, torch::Tensor> rasterize_to_pixels_mean_var_fwd_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& uncertainties,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
+torch::Tensor rasterize_to_pixels_uncertainty_bwd_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_var,
     const uint32_t dim1,
     const uint32_t dim0,
     const uint32_t tile_size);
@@ -204,6 +288,24 @@ rasterize_to_pixels_bwd_per_gaussian_tensor(
     const uint32_t tile_size,
     const bool absgrad);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+rasterize_to_pixels_mean_var_bwd_per_gaussian_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& isect_ids,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_output,
+    const torch::Tensor& v_render_var,
+    const torch::Tensor& uncertainties,
+    const bool detach_var_contribution,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const bool absgrad);
+
 torch::Tensor beta_rasterize_to_pixels_fwd_tensor(
     const torch::Tensor& means2d,
     const torch::Tensor& conics,
@@ -212,6 +314,32 @@ torch::Tensor beta_rasterize_to_pixels_fwd_tensor(
     const torch::Tensor& betas,
     const torch::Tensor& tile_offsets,
     const torch::Tensor& flatten_ids,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
+std::tuple<torch::Tensor, torch::Tensor> beta_rasterize_to_pixels_mean_var_fwd_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& betas,
+    const torch::Tensor& uncertainties,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size);
+
+torch::Tensor beta_rasterize_to_pixels_uncertainty_bwd_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_var,
     const uint32_t dim1,
     const uint32_t dim0,
     const uint32_t tile_size);
@@ -242,6 +370,25 @@ beta_rasterize_to_pixels_bwd_per_gaussian_tensor(
     const torch::Tensor& isect_ids,
     const torch::Tensor& flatten_ids,
     const torch::Tensor& v_render_output,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const bool absgrad);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+beta_rasterize_to_pixels_mean_var_bwd_per_gaussian_tensor(
+    const torch::Tensor& means2d,
+    const torch::Tensor& conics,
+    const torch::Tensor& opacities,
+    const torch::Tensor& mus,
+    const torch::Tensor& betas,
+    const torch::Tensor& tile_offsets,
+    const torch::Tensor& isect_ids,
+    const torch::Tensor& flatten_ids,
+    const torch::Tensor& v_render_output,
+    const torch::Tensor& v_render_var,
+    const torch::Tensor& uncertainties,
+    const bool detach_var_contribution,
     const uint32_t dim1,
     const uint32_t dim0,
     const uint32_t tile_size,

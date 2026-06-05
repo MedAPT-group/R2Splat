@@ -6,5 +6,9 @@ init_scale_multiplier: 1.0
 
 primitive_type: gaussian
 
+init_uncertainty: 0.0025
+uncertainty_q_min: 1.0e-6
+uncertainty_q_max: 0.1
+
 scale_min_relative: 0.0005
 scale_max_relative: 0.5

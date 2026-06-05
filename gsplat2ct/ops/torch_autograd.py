@@ -69,6 +69,34 @@ def activate_gaussian_params(
     return quats, scales, opacity, covars, max_scales
 
 
+def activate_uncertainty(
+    raw_uncertainty: torch.Tensor,
+    *,
+    q_min: float = 1.0e-6,
+    q_max: Optional[float] = None,
+) -> torch.Tensor:
+    """Activate raw primitive relative-variance parameters."""
+    q = torch.nn.functional.softplus(raw_uncertainty.reshape(-1)) + float(q_min)
+    if q_max is not None and float(q_max) > 0.0:
+        q = q.clamp(max=float(q_max))
+    return q.contiguous()
+
+
+def uncertainty_activation_grad(
+    raw_uncertainty: torch.Tensor,
+    *,
+    q_min: float = 1.0e-6,
+    q_max: Optional[float] = None,
+) -> torch.Tensor:
+    """Derivative of ``activate_uncertainty`` w.r.t. the raw parameter."""
+    raw = raw_uncertainty.reshape(-1)
+    grad = torch.sigmoid(raw)
+    if q_max is not None and float(q_max) > 0.0:
+        unclamped = torch.nn.functional.softplus(raw) + float(q_min)
+        grad = torch.where(unclamped <= float(q_max), grad, torch.zeros_like(grad))
+    return grad.contiguous()
+
+
 class _ProjectionFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, means, covars, viewmats, Ks, img_w, img_h, eps_blur, radius_clip):
@@ -280,6 +308,182 @@ class _RasterizeFunction(torch.autograd.Function):
         )
 
 
+class _RasterizeMeanVarFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        means2d,
+        conics,
+        opacity,
+        mus,
+        beta2d,
+        uncertainty,
+        tile_offsets,
+        flatten_ids,
+        isect_ids,
+        img_w,
+        img_h,
+        tile_size,
+        primitive_type,
+        absgrad,
+        per_primitive,
+        detach_var_contribution,
+    ):
+        from ..cuda._wrapper import (
+            beta_rasterize_to_pixels_mean_var_fwd,
+            rasterize_to_pixels_mean_var_fwd,
+        )
+
+        primitive_type = str(primitive_type).lower()
+        if primitive_type == "beta":
+            image, variance = beta_rasterize_to_pixels_mean_var_fwd(
+                means2d, conics, opacity, mus, beta2d, uncertainty,
+                tile_offsets, flatten_ids, img_w, img_h, tile_size
+            )
+        else:
+            image, variance = rasterize_to_pixels_mean_var_fwd(
+                means2d, conics, opacity, mus, uncertainty, tile_offsets,
+                flatten_ids, img_w, img_h, tile_size
+            )
+            beta2d = torch.empty(0, device=means2d.device, dtype=means2d.dtype)
+        ctx.save_for_backward(
+            means2d,
+            conics,
+            opacity,
+            mus,
+            beta2d,
+            uncertainty,
+            tile_offsets,
+            flatten_ids,
+            isect_ids,
+        )
+        ctx.img_w = int(img_w)
+        ctx.img_h = int(img_h)
+        ctx.tile_size = int(tile_size)
+        ctx.primitive_type = primitive_type
+        ctx.absgrad = bool(absgrad)
+        ctx.per_primitive = bool(per_primitive)
+        ctx.detach_var_contribution = bool(detach_var_contribution)
+        return image, variance
+
+    @staticmethod
+    def backward(ctx, v_image, v_variance):
+        global _LAST_RASTER_ABSGRAD
+        from ..cuda._wrapper import (
+            beta_rasterize_to_pixels_bwd,
+            beta_rasterize_to_pixels_bwd_per_gaussian,
+            beta_rasterize_to_pixels_mean_var_bwd_per_gaussian,
+            beta_rasterize_to_pixels_uncertainty_bwd,
+            rasterize_to_pixels_bwd,
+            rasterize_to_pixels_bwd_per_gaussian,
+            rasterize_to_pixels_mean_var_bwd_per_gaussian,
+            rasterize_to_pixels_uncertainty_bwd,
+        )
+
+        (
+            means2d,
+            conics,
+            opacity,
+            mus,
+            beta2d,
+            _uncertainty,
+            tile_offsets,
+            flatten_ids,
+            isect_ids,
+        ) = ctx.saved_tensors
+
+        v_means = v_conics = v_opacity = v_mus = v_beta = None
+        v_uncertainty = None
+        if v_variance is not None:
+            image_grad = (
+                v_image.contiguous()
+                if v_image is not None
+                else torch.zeros_like(v_variance)
+            )
+            if ctx.primitive_type == "beta":
+                grads = beta_rasterize_to_pixels_mean_var_bwd_per_gaussian(
+                    means2d, conics, opacity, mus, beta2d, tile_offsets,
+                    isect_ids, flatten_ids, image_grad, v_variance.contiguous(),
+                    _uncertainty, ctx.detach_var_contribution, ctx.img_w,
+                    ctx.img_h, ctx.tile_size, ctx.absgrad
+                )
+                (
+                    v_means_abs,
+                    v_means,
+                    v_conics,
+                    v_opacity,
+                    v_mus,
+                    v_beta,
+                    v_uncertainty,
+                ) = grads
+            else:
+                grads = rasterize_to_pixels_mean_var_bwd_per_gaussian(
+                    means2d, conics, opacity, mus, tile_offsets, isect_ids,
+                    flatten_ids, image_grad, v_variance.contiguous(),
+                    _uncertainty, ctx.detach_var_contribution, ctx.img_w,
+                    ctx.img_h, ctx.tile_size, ctx.absgrad
+                )
+                v_means_abs, v_means, v_conics, v_opacity, v_mus, v_uncertainty = grads
+                v_beta = None
+            _LAST_RASTER_ABSGRAD = (
+                v_means_abs.detach()
+                if v_image is not None and v_means_abs is not None
+                else None
+            )
+        elif v_image is not None:
+            if ctx.primitive_type == "beta":
+                if ctx.per_primitive:
+                    grads = beta_rasterize_to_pixels_bwd_per_gaussian(
+                        means2d, conics, opacity, mus, beta2d, tile_offsets,
+                        isect_ids, flatten_ids, v_image.contiguous(), ctx.img_w,
+                        ctx.img_h, ctx.tile_size, ctx.absgrad
+                    )
+                else:
+                    grads = beta_rasterize_to_pixels_bwd(
+                        means2d, conics, opacity, mus, beta2d, tile_offsets,
+                        flatten_ids, v_image.contiguous(), ctx.img_w, ctx.img_h,
+                        ctx.tile_size, ctx.absgrad
+                    )
+                v_means_abs, v_means, v_conics, v_opacity, v_mus, v_beta = grads
+            else:
+                if ctx.per_primitive:
+                    grads = rasterize_to_pixels_bwd_per_gaussian(
+                        means2d, conics, opacity, mus, tile_offsets, isect_ids,
+                        flatten_ids, v_image.contiguous(), ctx.img_w, ctx.img_h,
+                        ctx.tile_size, ctx.absgrad
+                    )
+                else:
+                    grads = rasterize_to_pixels_bwd(
+                        means2d, conics, opacity, mus, tile_offsets, flatten_ids,
+                        v_image.contiguous(), ctx.img_w, ctx.img_h,
+                        ctx.tile_size, ctx.absgrad
+                    )
+                v_means_abs, v_means, v_conics, v_opacity, v_mus = grads
+                v_beta = None
+            _LAST_RASTER_ABSGRAD = v_means_abs.detach() if v_means_abs is not None else None
+        else:
+            _LAST_RASTER_ABSGRAD = None
+
+        return (
+            v_means,
+            v_conics,
+            v_opacity,
+            v_mus,
+            v_beta,
+            v_uncertainty,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 class _VoxelizeFunction(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -375,11 +579,165 @@ class _VoxelizeFunction(torch.autograd.Function):
         )
 
 
+class _VoxelizeMeanVarFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        means3d,
+        conics,
+        opacity,
+        gamma,
+        uncertainty,
+        tile_offsets,
+        flatten_ids,
+        isect_ids,
+        vol_dim2,
+        vol_dim1,
+        vol_dim0,
+        tile_size,
+        primitive_type,
+        per_primitive,
+        detach_var_contribution,
+    ):
+        from ..cuda._wrapper import (
+            beta_voxelize_to_voxels_mean_var_fwd,
+            voxelize_to_voxels_mean_var_fwd,
+        )
+
+        primitive_type = str(primitive_type).lower()
+        if primitive_type == "beta":
+            volume, variance = beta_voxelize_to_voxels_mean_var_fwd(
+                means3d, conics, opacity, gamma, uncertainty, tile_offsets,
+                flatten_ids, vol_dim2, vol_dim1, vol_dim0, tile_size
+            )
+        else:
+            volume, variance = voxelize_to_voxels_mean_var_fwd(
+                means3d, conics, opacity, uncertainty, tile_offsets, flatten_ids,
+                vol_dim2, vol_dim1, vol_dim0, tile_size
+            )
+            gamma = torch.empty(0, device=means3d.device, dtype=means3d.dtype)
+        ctx.save_for_backward(
+            means3d,
+            conics,
+            opacity,
+            gamma,
+            uncertainty,
+            tile_offsets,
+            flatten_ids,
+            isect_ids,
+        )
+        ctx.vol_dim2 = int(vol_dim2)
+        ctx.vol_dim1 = int(vol_dim1)
+        ctx.vol_dim0 = int(vol_dim0)
+        ctx.tile_size = int(tile_size)
+        ctx.primitive_type = primitive_type
+        ctx.per_primitive = bool(per_primitive)
+        ctx.detach_var_contribution = bool(detach_var_contribution)
+        return volume, variance
+
+    @staticmethod
+    def backward(ctx, v_volume, _v_variance):
+        from ..cuda._wrapper import (
+            beta_voxelize_to_voxels_bwd,
+            beta_voxelize_to_voxels_bwd_per_gaussian,
+            beta_voxelize_to_voxels_mean_var_bwd_per_gaussian,
+            voxelize_to_voxels_bwd,
+            voxelize_to_voxels_bwd_per_gaussian,
+            voxelize_to_voxels_mean_var_bwd_per_gaussian,
+        )
+
+        (
+            means3d,
+            conics,
+            opacity,
+            gamma,
+            _uncertainty,
+            tile_offsets,
+            flatten_ids,
+            isect_ids,
+        ) = ctx.saved_tensors
+        v_means = v_conics = v_opacity = v_gamma = None
+        v_uncertainty = None
+        if _v_variance is not None:
+            volume_grad = (
+                v_volume.contiguous()
+                if v_volume is not None
+                else torch.zeros_like(_v_variance)
+            )
+            if ctx.primitive_type == "beta":
+                (
+                    v_means,
+                    v_conics,
+                    v_opacity,
+                    v_gamma,
+                    v_uncertainty,
+                ) = beta_voxelize_to_voxels_mean_var_bwd_per_gaussian(
+                    means3d, conics, opacity, gamma, tile_offsets, isect_ids,
+                    flatten_ids, volume_grad, _v_variance.contiguous(),
+                    _uncertainty, ctx.detach_var_contribution, ctx.vol_dim2,
+                    ctx.vol_dim1, ctx.vol_dim0, ctx.tile_size
+                )
+            else:
+                v_means, v_conics, v_opacity, v_uncertainty = voxelize_to_voxels_mean_var_bwd_per_gaussian(
+                    means3d, conics, opacity, tile_offsets, isect_ids,
+                    flatten_ids, volume_grad, _v_variance.contiguous(),
+                    _uncertainty, ctx.detach_var_contribution, ctx.vol_dim2,
+                    ctx.vol_dim1, ctx.vol_dim0, ctx.tile_size
+                )
+                v_gamma = None
+        elif v_volume is not None:
+            if ctx.primitive_type == "beta":
+                if ctx.per_primitive:
+                    v_means, v_conics, v_opacity, v_gamma = beta_voxelize_to_voxels_bwd_per_gaussian(
+                        means3d, conics, opacity, gamma, tile_offsets, isect_ids,
+                        flatten_ids, v_volume.contiguous(), ctx.vol_dim2,
+                        ctx.vol_dim1, ctx.vol_dim0, ctx.tile_size
+                    )
+                else:
+                    v_means, v_conics, v_opacity, v_gamma = beta_voxelize_to_voxels_bwd(
+                        means3d, conics, opacity, gamma, tile_offsets, flatten_ids,
+                        v_volume.contiguous(), ctx.vol_dim2, ctx.vol_dim1,
+                        ctx.vol_dim0, ctx.tile_size
+                    )
+            else:
+                if ctx.per_primitive:
+                    v_means, v_conics, v_opacity = voxelize_to_voxels_bwd_per_gaussian(
+                        means3d, conics, opacity, tile_offsets, isect_ids,
+                        flatten_ids, v_volume.contiguous(), ctx.vol_dim2,
+                        ctx.vol_dim1, ctx.vol_dim0, ctx.tile_size
+                    )
+                else:
+                    v_means, v_conics, v_opacity = voxelize_to_voxels_bwd(
+                        means3d, conics, opacity, tile_offsets, flatten_ids,
+                        v_volume.contiguous(), ctx.vol_dim2, ctx.vol_dim1,
+                        ctx.vol_dim0, ctx.tile_size
+                    )
+                v_gamma = None
+        return (
+            v_means,
+            v_conics,
+            v_opacity,
+            v_gamma,
+            v_uncertainty,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 @dataclass
 class ProjectionRasterizationResult:
     image: torch.Tensor
     means2d: torch.Tensor
     radii: torch.Tensor
+    variance: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -387,6 +745,7 @@ class MappingVoxelizationResult:
     volume: torch.Tensor
     means3d: torch.Tensor
     radii: torch.Tensor
+    variance: Optional[torch.Tensor] = None
 
 
 class GaussianProjectionRasterizer(nn.Module):
@@ -401,6 +760,7 @@ class GaussianProjectionRasterizer(nn.Module):
         primitive_type: str = "gaussian",
         absgrad: bool = False,
         backward_mode: str = "pixel",
+        uncertainty_detach_contribution: bool = True,
     ):
         super().__init__()
         self.img_w = int(img_w)
@@ -411,6 +771,7 @@ class GaussianProjectionRasterizer(nn.Module):
         self.primitive_type = str(primitive_type).lower()
         self.absgrad = bool(absgrad)
         self.backward_mode = str(backward_mode).lower()
+        self.uncertainty_detach_contribution = bool(uncertainty_detach_contribution)
 
     def forward(
         self,
@@ -422,6 +783,7 @@ class GaussianProjectionRasterizer(nn.Module):
         *,
         beta: Optional[torch.Tensor] = None,
         beta_gamma_init: float = 3.5,
+        uncertainty: Optional[torch.Tensor] = None,
     ) -> ProjectionRasterizationResult:
         from ..cuda._wrapper import isect_offset_encode, isect_tiles
 
@@ -453,23 +815,49 @@ class GaussianProjectionRasterizer(nn.Module):
             means2d, radii, self.tile_size, n_tiles_w, n_tiles_h
         )
         tile_offsets = isect_offset_encode(isect_ids, C, n_tiles_w, n_tiles_h)
-        image = _RasterizeFunction.apply(
-            means2d,
-            conics,
-            opacity2d,
-            mus,
-            beta2d,
-            tile_offsets,
-            flatten_ids,
-            isect_ids,
-            self.img_w,
-            self.img_h,
-            self.tile_size,
-            self.primitive_type,
-            self.absgrad,
-            self.backward_mode == "primitive",
+        if uncertainty is None:
+            image = _RasterizeFunction.apply(
+                means2d,
+                conics,
+                opacity2d,
+                mus,
+                beta2d,
+                tile_offsets,
+                flatten_ids,
+                isect_ids,
+                self.img_w,
+                self.img_h,
+                self.tile_size,
+                self.primitive_type,
+                self.absgrad,
+                self.backward_mode == "primitive",
+            )
+            variance = None
+        else:
+            image, variance = _RasterizeMeanVarFunction.apply(
+                means2d,
+                conics,
+                opacity2d,
+                mus,
+                beta2d,
+                uncertainty.reshape(-1).contiguous(),
+                tile_offsets,
+                flatten_ids,
+                isect_ids,
+                self.img_w,
+                self.img_h,
+                self.tile_size,
+                self.primitive_type,
+                self.absgrad,
+                self.backward_mode == "primitive",
+                self.uncertainty_detach_contribution,
+            )
+        return ProjectionRasterizationResult(
+            image=image,
+            means2d=means2d,
+            radii=radii,
+            variance=variance,
         )
-        return ProjectionRasterizationResult(image=image, means2d=means2d, radii=radii)
 
 
 class GaussianMappingVoxelizer(nn.Module):
@@ -484,6 +872,7 @@ class GaussianMappingVoxelizer(nn.Module):
         radius_clip: float = 3.0,
         primitive_type: str = "gaussian",
         backward_mode: str = "pixel",
+        uncertainty_detach_contribution: bool = True,
     ):
         super().__init__()
         self.vol_dim2 = int(vol_dim2)
@@ -494,6 +883,7 @@ class GaussianMappingVoxelizer(nn.Module):
         self.radius_clip = float(radius_clip)
         self.primitive_type = str(primitive_type).lower()
         self.backward_mode = str(backward_mode).lower()
+        self.uncertainty_detach_contribution = bool(uncertainty_detach_contribution)
 
     def forward(
         self,
@@ -506,6 +896,7 @@ class GaussianMappingVoxelizer(nn.Module):
         *,
         beta: Optional[torch.Tensor] = None,
         beta_gamma_init: float = 3.5,
+        uncertainty: Optional[torch.Tensor] = None,
     ) -> MappingVoxelizationResult:
         from ..cuda._wrapper import isect_offset_encode_3d, isect_tiles_3d
 
@@ -534,22 +925,47 @@ class GaussianMappingVoxelizer(nn.Module):
             means3d, radii, self.tile_size, n_tiles_z, n_tiles_y, n_tiles_x
         )
         tile_offsets = isect_offset_encode_3d(isect_ids, n_tiles_z, n_tiles_y, n_tiles_x)
-        volume = _VoxelizeFunction.apply(
-            means3d,
-            conics,
-            opacity,
-            gamma,
-            tile_offsets,
-            flatten_ids,
-            isect_ids,
-            self.vol_dim2,
-            self.vol_dim1,
-            self.vol_dim0,
-            self.tile_size,
-            self.primitive_type,
-            self.backward_mode == "primitive",
+        if uncertainty is None:
+            volume = _VoxelizeFunction.apply(
+                means3d,
+                conics,
+                opacity,
+                gamma,
+                tile_offsets,
+                flatten_ids,
+                isect_ids,
+                self.vol_dim2,
+                self.vol_dim1,
+                self.vol_dim0,
+                self.tile_size,
+                self.primitive_type,
+                self.backward_mode == "primitive",
+            )
+            variance = None
+        else:
+            volume, variance = _VoxelizeMeanVarFunction.apply(
+                means3d,
+                conics,
+                opacity,
+                gamma,
+                uncertainty.reshape(-1).contiguous(),
+                tile_offsets,
+                flatten_ids,
+                isect_ids,
+                self.vol_dim2,
+                self.vol_dim1,
+                self.vol_dim0,
+                self.tile_size,
+                self.primitive_type,
+                self.backward_mode == "primitive",
+                self.uncertainty_detach_contribution,
+            )
+        return MappingVoxelizationResult(
+            volume=volume,
+            means3d=means3d,
+            radii=radii,
+            variance=variance,
         )
-        return MappingVoxelizationResult(volume=volume, means3d=means3d, radii=radii)
 
 
 __all__ = [
@@ -558,5 +974,7 @@ __all__ = [
     "MappingVoxelizationResult",
     "ProjectionRasterizationResult",
     "activate_gaussian_params",
+    "activate_uncertainty",
+    "uncertainty_activation_grad",
     "pop_last_raster_absgrad",
 ]

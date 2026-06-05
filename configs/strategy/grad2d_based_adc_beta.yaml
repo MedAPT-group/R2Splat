@@ -17,3 +17,10 @@ min_remaining: 100
 max_gaussians: 500000
 
 split_scales_div: 1.6
+uncertainty_grad_weight: 0.0
+uncertainty_grad_mode: std
+uncertainty_grad_scale: 1.0
+uncertainty_grad_max_multiplier: 0.0
+split_sampling: random
+split_long_axis_offset: 0.5
+new_uncertainty_mode: inherit

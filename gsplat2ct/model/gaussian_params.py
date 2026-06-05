@@ -58,10 +58,13 @@ class GaussianParams:
         quats: torch.Tensor,
         scale_ori: torch.Tensor,
         opacity: torch.Tensor,
+        raw_uncertainty: Optional[torch.Tensor] = None,
         beta: Optional[torch.Tensor] = None,
         primitive_type: str = "gaussian",
         beta_gamma_init: float = 3.5,
         beta_gamma_min: Optional[float] = None,
+        init_uncertainty: float = 0.0025,
+        uncertainty_q_min: float = 1.0e-6,
         device: torch.device = torch.device("cuda"),
     ):
         self.device = device
@@ -72,10 +75,22 @@ class GaussianParams:
         # current activation is gamma = beta_gamma_init * exp(raw_beta).
         self.beta_gamma_min = 0.0
         self.beta_gamma_init = float(beta_gamma_init)
+        self.init_uncertainty = float(init_uncertainty)
+        self.uncertainty_q_min = float(uncertainty_q_min)
         self.means = means.to(device)
         self.quats = quats.to(device)
         self.scale_ori = scale_ori.to(device)
         self.opacity = opacity.to(device)
+        if raw_uncertainty is None:
+            self.raw_uncertainty = self._make_raw_uncertainty(
+                self.means.shape[0],
+                dtype=self.means.dtype,
+                device=device,
+                q0=init_uncertainty,
+                q_min=uncertainty_q_min,
+            )
+        else:
+            self.raw_uncertainty = raw_uncertainty.to(device).reshape(-1).contiguous()
         self.beta = beta.to(device) if beta is not None else None
         if self.primitive_type == "beta" and self.beta is None:
             self.beta = torch.zeros(
@@ -104,6 +119,8 @@ class GaussianParams:
         primitive_type: str = "gaussian",
         beta_gamma_init: float = 3.5,
         beta_gamma_min: Optional[float] = None,
+        init_uncertainty: float = 0.0025,
+        uncertainty_q_min: float = 1.0e-6,
         device: str = "cuda",
     ) -> "GaussianParams":
         """Load ``init_<scene>.npy`` and create parameter tensors.
@@ -161,6 +178,8 @@ class GaussianParams:
             primitive_type=primitive_type,
             beta_gamma_init=beta_gamma_init,
             beta_gamma_min=beta_gamma_min,
+            init_uncertainty=init_uncertainty,
+            uncertainty_q_min=uncertainty_q_min,
             device=dev,
         )
 
@@ -182,6 +201,8 @@ class GaussianParams:
         primitive_type: str = "gaussian",
         beta_gamma_init: float = 3.5,
         beta_gamma_min: Optional[float] = None,
+        init_uncertainty: float = 0.0025,
+        uncertainty_q_min: float = 1.0e-6,
         device: str = "cuda",
     ) -> "GaussianParams":
         """Create Gaussian parameters from sampled points ``(N, >=4)``.
@@ -234,6 +255,8 @@ class GaussianParams:
             primitive_type=primitive_type,
             beta_gamma_init=beta_gamma_init,
             beta_gamma_min=beta_gamma_min,
+            init_uncertainty=init_uncertainty,
+            uncertainty_q_min=uncertainty_q_min,
             device=dev,
         )
 
@@ -252,6 +275,7 @@ class GaussianParams:
         params.add_param("quats", _ParamWrapper(self.quats))
         params.add_param("scale_ori", _ParamWrapper(self.scale_ori))
         params.add_param("opacity", _ParamWrapper(self.opacity))
+        params.add_param("raw_uncertainty", _ParamWrapper(self.raw_uncertainty))
         if self.primitive_type == "beta" and self.beta is not None:
             params.add_param("beta", _ParamWrapper(self.beta))
         return params
@@ -263,6 +287,9 @@ class GaussianParams:
         self.quats = params.get("quats").data
         self.scale_ori = params.get("scale_ori").data
         self.opacity = params.get("opacity").data
+        raw_uncertainty_param = params.get("raw_uncertainty")
+        if raw_uncertainty_param is not None:
+            self.raw_uncertainty = raw_uncertainty_param.data.reshape(-1).contiguous()
         beta_param = params.get("beta")
         if beta_param is not None:
             self.beta = beta_param.data
@@ -282,6 +309,7 @@ class GaussianParams:
             self.quats = self.quats[mask].contiguous()
             self.scale_ori = self.scale_ori[mask].contiguous()
             self.opacity = self.opacity[mask].contiguous()
+            self.raw_uncertainty = self.raw_uncertainty[mask].contiguous()
             if self.beta is not None:
                 self.beta = self.beta[mask].contiguous()
 
@@ -300,6 +328,10 @@ class GaussianParams:
                 "scale_ori": self.scale_ori.detach().cpu(),
                 "opacity": self.opacity.detach().cpu(),
                 "opacity_activation": "softplus",
+                "raw_uncertainty": self.raw_uncertainty.detach().cpu(),
+                "uncertainty_activation": "softplus_plus_floor",
+                "init_uncertainty": self.init_uncertainty,
+                "uncertainty_q_min": self.uncertainty_q_min,
                 "beta": None if self.beta is None else self.beta.detach().cpu(),
                 "primitive_type": self.primitive_type,
                 "beta_activation": "scaled_exp",
@@ -325,10 +357,13 @@ class GaussianParams:
             quats=ckpt["quats"],
             scale_ori=ckpt["scale_ori"],
             opacity=ckpt["opacity"],
+            raw_uncertainty=ckpt.get("raw_uncertainty", None),
             beta=ckpt.get("beta", None),
             primitive_type=str(ckpt.get("primitive_type", "beta" if ckpt.get("beta", None) is not None else "gaussian")),
             beta_gamma_init=float(ckpt.get("beta_gamma_init", 3.5)),
             beta_gamma_min=float(ckpt.get("beta_gamma_min", 0.0)),
+            init_uncertainty=float(ckpt.get("init_uncertainty", 0.0025)),
+            uncertainty_q_min=float(ckpt.get("uncertainty_q_min", 1.0e-6)),
             device=torch.device(device),
         )
         return gp, int(ckpt.get("step", -1))
@@ -336,6 +371,34 @@ class GaussianParams:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _inverse_softplus(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        x = x.clamp_min(eps)
+        return torch.where(
+            x > 20.0,
+            x,
+            torch.log(torch.expm1(x).clamp_min(eps)),
+        )
+
+    @classmethod
+    def _make_raw_uncertainty(
+        cls,
+        n_points: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+        q0: float = 0.0025,
+        q_min: float = 1.0e-6,
+    ) -> torch.Tensor:
+        q0_eff = max(float(q0), float(q_min) + 1.0e-12)
+        target = torch.full(
+            (int(n_points),),
+            q0_eff - float(q_min),
+            dtype=dtype,
+            device=device,
+        )
+        return cls._inverse_softplus(target).contiguous()
 
     @staticmethod
     def _compute_nn_distances(xyz: torch.Tensor) -> torch.Tensor:

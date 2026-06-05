@@ -289,6 +289,185 @@ void launch_voxelize_to_voxels_fwd(
     );
 }
 
+template <typename S>
+__global__ void voxelize_to_voxels_mean_var_fwd_kernel(
+    const uint32_t N,
+    const uint32_t n_isects,
+    const vec3<S>* __restrict__ means3d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const S* __restrict__ uncertainties,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const uint32_t n_tiles_dim2,
+    const uint32_t n_tiles_dim1,
+    const uint32_t n_tiles_dim0,
+    const int32_t* __restrict__ tile_offsets,
+    const int32_t* __restrict__ flatten_ids,
+    S* __restrict__ render_output,
+    S* __restrict__ render_var
+) {
+    auto block = cg::this_thread_block();
+
+    int32_t tile_id = block.group_index().x * n_tiles_dim1 * n_tiles_dim2 +
+                      block.group_index().y * n_tiles_dim2 +
+                      block.group_index().z;
+
+    uint32_t i = block.group_index().x * tile_size + block.thread_index().x;
+    uint32_t j = block.group_index().y * tile_size + block.thread_index().y;
+    uint32_t k = block.group_index().z * tile_size + block.thread_index().z;
+
+    const S px = static_cast<S>(k) + static_cast<S>(0.5);
+    const S py = static_cast<S>(j) + static_cast<S>(0.5);
+    const S pz = static_cast<S>(i) + static_cast<S>(0.5);
+    const int32_t vox_id = i * dim1 * dim2 + j * dim2 + k;
+
+    const bool inside = (i < dim0 && j < dim1 && k < dim2);
+    bool done = !inside;
+
+    const int32_t range_start = tile_offsets[tile_id];
+    const int32_t range_end = (tile_id == static_cast<int32_t>(n_tiles_dim0 * n_tiles_dim1 * n_tiles_dim2) - 1)
+                                  ? static_cast<int32_t>(n_isects)
+                                  : tile_offsets[tile_id + 1];
+
+    const uint32_t block_size = block.size();
+    const uint32_t num_batches = (range_end - range_start + block_size - 1) / block_size;
+
+    extern __shared__ int s[];
+    int32_t* id_batch = reinterpret_cast<int32_t*>(s);
+    vec3<S>* xyz_batch = reinterpret_cast<vec3<S>*>(&id_batch[block_size]);
+    S* conic_batch = reinterpret_cast<S*>(&xyz_batch[block_size]);
+    S* opac_batch = &conic_batch[block_size * 6];
+    S* uncertainty_batch = &opac_batch[block_size];
+
+    const uint32_t tr = block.thread_rank();
+    S vox_out = static_cast<S>(0);
+    S vox_var = static_cast<S>(0);
+
+    for (uint32_t b = 0; b < num_batches; ++b) {
+        if (__syncthreads_count(done) >= static_cast<int>(block_size)) {
+            break;
+        }
+
+        const uint32_t batch_start = range_start + block_size * b;
+        const uint32_t idx = batch_start + tr;
+        if (idx < static_cast<uint32_t>(range_end)) {
+            const int32_t g = flatten_ids[idx];
+            id_batch[tr] = g;
+            xyz_batch[tr] = means3d[g];
+            opac_batch[tr] = opacities[g];
+            uncertainty_batch[tr] = uncertainties[g];
+            const S* conic_ptr = conics + g * 6;
+            S* dest_ptr = conic_batch + tr * 6;
+            dest_ptr[0] = conic_ptr[0];
+            dest_ptr[1] = conic_ptr[1];
+            dest_ptr[2] = conic_ptr[2];
+            dest_ptr[3] = conic_ptr[3];
+            dest_ptr[4] = conic_ptr[4];
+            dest_ptr[5] = conic_ptr[5];
+        }
+
+        block.sync();
+
+        const uint32_t batch_size = min(block_size, static_cast<uint32_t>(range_end) - batch_start);
+        for (uint32_t t = 0; (t < batch_size) && !done; ++t) {
+            const vec3<S> xyz = xyz_batch[t];
+            const S* conic_ptr = conic_batch + t * 6;
+            const vec3<S> delta = {px - xyz.x, py - xyz.y, pz - xyz.z};
+            const S c00 = conic_ptr[0];
+            const S c01 = conic_ptr[1];
+            const S c02 = conic_ptr[2];
+            const S c11 = conic_ptr[3];
+            const S c12 = conic_ptr[4];
+            const S c22 = conic_ptr[5];
+
+            const S sigma = static_cast<S>(0.5) * (
+                c00 * delta.x * delta.x +
+                c11 * delta.y * delta.y +
+                c22 * delta.z * delta.z
+            ) + c01 * delta.x * delta.y +
+                c02 * delta.x * delta.z +
+                c12 * delta.y * delta.z;
+
+            const S alpha = opac_batch[t] * __expf(-sigma);
+            if (sigma < static_cast<S>(0) || fabsf(alpha) < static_cast<S>(1e-6)) {
+                continue;
+            }
+
+            vox_out += alpha;
+            vox_var += uncertainty_batch[t] * alpha * alpha;
+        }
+    }
+
+    if (inside) {
+        render_output[vox_id] = vox_out;
+        render_var[vox_id] = vox_var;
+    }
+}
+
+template <typename S>
+void launch_voxelize_to_voxels_mean_var_fwd(
+    const S* __restrict__ means3d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const S* __restrict__ uncertainties,
+    const int32_t* __restrict__ tile_offsets,
+    const int32_t* __restrict__ flatten_ids,
+    S* __restrict__ render_output,
+    S* __restrict__ render_var,
+    uint32_t N,
+    uint32_t n_isects,
+    uint32_t dim2,
+    uint32_t dim1,
+    uint32_t dim0,
+    uint32_t tile_size,
+    uint32_t n_tiles_dim2,
+    uint32_t n_tiles_dim1,
+    uint32_t n_tiles_dim0,
+    cudaStream_t stream
+) {
+    dim3 threads = {tile_size, tile_size, tile_size};
+    dim3 blocks = {n_tiles_dim0, n_tiles_dim1, n_tiles_dim2};
+    const uint32_t block_size = tile_size * tile_size * tile_size;
+    const uint32_t shared_mem = block_size * (
+        sizeof(int32_t) +
+        sizeof(vec3<S>) +
+        6 * sizeof(S) +
+        sizeof(S) +
+        sizeof(S)
+    );
+
+    if (cudaFuncSetAttribute(
+            voxelize_to_voxels_mean_var_fwd_kernel<S>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            shared_mem
+        ) != cudaSuccess) {
+        // Fallback if setting fails - kernel may still work with default shared memory.
+    }
+
+    voxelize_to_voxels_mean_var_fwd_kernel<S><<<blocks, threads, shared_mem, stream>>>(
+        N,
+        n_isects,
+        reinterpret_cast<const vec3<S>*>(means3d),
+        conics,
+        opacities,
+        uncertainties,
+        dim2,
+        dim1,
+        dim0,
+        tile_size,
+        n_tiles_dim2,
+        n_tiles_dim1,
+        n_tiles_dim0,
+        tile_offsets,
+        flatten_ids,
+        render_output,
+        render_var
+    );
+}
+
 // ============================================================================
 // Beta Forward Pass Kernel
 // ============================================================================
@@ -459,6 +638,184 @@ void launch_beta_voxelize_to_voxels_fwd(
     );
 }
 
+template <typename S>
+__global__ void beta_voxelize_to_voxels_mean_var_fwd_kernel(
+    const uint32_t N,
+    const uint32_t n_isects,
+    const vec3<S>* __restrict__ means3d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const S* __restrict__ betas,
+    const S* __restrict__ uncertainties,
+    const uint32_t dim2,
+    const uint32_t dim1,
+    const uint32_t dim0,
+    const uint32_t tile_size,
+    const uint32_t n_tiles_dim2,
+    const uint32_t n_tiles_dim1,
+    const uint32_t n_tiles_dim0,
+    const int32_t* __restrict__ tile_offsets,
+    const int32_t* __restrict__ flatten_ids,
+    S* __restrict__ render_output,
+    S* __restrict__ render_var
+) {
+    auto block = cg::this_thread_block();
+    int32_t tile_id = block.group_index().x * n_tiles_dim1 * n_tiles_dim2 +
+                      block.group_index().y * n_tiles_dim2 +
+                      block.group_index().z;
+
+    uint32_t i = block.group_index().x * tile_size + block.thread_index().x;
+    uint32_t j = block.group_index().y * tile_size + block.thread_index().y;
+    uint32_t k = block.group_index().z * tile_size + block.thread_index().z;
+
+    const S px = static_cast<S>(k) + static_cast<S>(0.5);
+    const S py = static_cast<S>(j) + static_cast<S>(0.5);
+    const S pz = static_cast<S>(i) + static_cast<S>(0.5);
+    const int32_t vox_id = i * dim1 * dim2 + j * dim2 + k;
+
+    const bool inside = (i < dim0 && j < dim1 && k < dim2);
+    bool done = !inside;
+
+    const int32_t range_start = tile_offsets[tile_id];
+    const int32_t range_end = (tile_id == static_cast<int32_t>(n_tiles_dim0 * n_tiles_dim1 * n_tiles_dim2) - 1)
+                                  ? static_cast<int32_t>(n_isects)
+                                  : tile_offsets[tile_id + 1];
+
+    const uint32_t block_size = block.size();
+    const uint32_t num_batches = (range_end - range_start + block_size - 1) / block_size;
+
+    extern __shared__ int s[];
+    int32_t* id_batch = reinterpret_cast<int32_t*>(s);
+    vec3<S>* xyz_batch = reinterpret_cast<vec3<S>*>(&id_batch[block_size]);
+    S* conic_batch = reinterpret_cast<S*>(&xyz_batch[block_size]);
+    S* opac_batch = &conic_batch[block_size * 6];
+    S* beta_batch = &opac_batch[block_size];
+    S* uncertainty_batch = &beta_batch[block_size];
+
+    const uint32_t tr = block.thread_rank();
+    S vox_out = static_cast<S>(0);
+    S vox_var = static_cast<S>(0);
+
+    for (uint32_t b = 0; b < num_batches; ++b) {
+        if (__syncthreads_count(done) >= static_cast<int>(block_size)) {
+            break;
+        }
+
+        const uint32_t batch_start = range_start + block_size * b;
+        const uint32_t idx = batch_start + tr;
+        if (idx < static_cast<uint32_t>(range_end)) {
+            const int32_t g = flatten_ids[idx];
+            id_batch[tr] = g;
+            xyz_batch[tr] = means3d[g];
+            opac_batch[tr] = opacities[g];
+            beta_batch[tr] = betas[g];
+            uncertainty_batch[tr] = uncertainties[g];
+            const S* conic_ptr = conics + g * 6;
+            S* dest_ptr = conic_batch + tr * 6;
+            #pragma unroll
+            for (int c = 0; c < 6; ++c) {
+                dest_ptr[c] = conic_ptr[c];
+            }
+        }
+
+        block.sync();
+
+        const uint32_t batch_size = min(block_size, static_cast<uint32_t>(range_end) - batch_start);
+        for (uint32_t t = 0; (t < batch_size) && !done; ++t) {
+            const vec3<S> xyz = xyz_batch[t];
+            const S* conic_ptr = conic_batch + t * 6;
+            const S a = conic_ptr[0], p = conic_ptr[1], q = conic_ptr[2];
+            const S bb = conic_ptr[3], r = conic_ptr[4], c = conic_ptr[5];
+            const vec3<S> delta = {xyz.x - px, xyz.y - py, xyz.z - pz};
+            const S d1 = delta.x, d2 = delta.y, d3 = delta.z;
+            const S qfull =
+                a * d1 * d1 + bb * d2 * d2 + c * d3 * d3 +
+                static_cast<S>(2) * p * d1 * d2 +
+                static_cast<S>(2) * q * d1 * d3 +
+                static_cast<S>(2) * r * d2 * d3;
+
+            if (qfull < static_cast<S>(0) || qfull >= static_cast<S>(1)) {
+                continue;
+            }
+
+            const S h = static_cast<S>(1) - qfull;
+            const S alpha = opac_batch[t] * pow(h, beta_batch[t]);
+            if (fabs(alpha) < static_cast<S>(1e-5)) {
+                continue;
+            }
+            vox_out += alpha;
+            vox_var += uncertainty_batch[t] * alpha * alpha;
+        }
+    }
+
+    if (inside) {
+        render_output[vox_id] = vox_out;
+        render_var[vox_id] = vox_var;
+    }
+}
+
+template <typename S>
+void launch_beta_voxelize_to_voxels_mean_var_fwd(
+    const S* __restrict__ means3d,
+    const S* __restrict__ conics,
+    const S* __restrict__ opacities,
+    const S* __restrict__ betas,
+    const S* __restrict__ uncertainties,
+    const int32_t* __restrict__ tile_offsets,
+    const int32_t* __restrict__ flatten_ids,
+    S* __restrict__ render_output,
+    S* __restrict__ render_var,
+    uint32_t N,
+    uint32_t n_isects,
+    uint32_t dim2,
+    uint32_t dim1,
+    uint32_t dim0,
+    uint32_t tile_size,
+    uint32_t n_tiles_dim2,
+    uint32_t n_tiles_dim1,
+    uint32_t n_tiles_dim0,
+    cudaStream_t stream
+) {
+    dim3 threads = {tile_size, tile_size, tile_size};
+    dim3 blocks = {n_tiles_dim0, n_tiles_dim1, n_tiles_dim2};
+    const uint32_t block_size = tile_size * tile_size * tile_size;
+    const uint32_t shared_mem = block_size * (
+        sizeof(int32_t) +
+        sizeof(vec3<S>) +
+        6 * sizeof(S) +
+        sizeof(S) +
+        sizeof(S) +
+        sizeof(S)
+    );
+
+    cudaFuncSetAttribute(
+        beta_voxelize_to_voxels_mean_var_fwd_kernel<S>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        shared_mem
+    );
+
+    beta_voxelize_to_voxels_mean_var_fwd_kernel<S><<<blocks, threads, shared_mem, stream>>>(
+        N,
+        n_isects,
+        reinterpret_cast<const vec3<S>*>(means3d),
+        conics,
+        opacities,
+        betas,
+        uncertainties,
+        dim2,
+        dim1,
+        dim0,
+        tile_size,
+        n_tiles_dim2,
+        n_tiles_dim1,
+        n_tiles_dim0,
+        tile_offsets,
+        flatten_ids,
+        render_output,
+        render_var
+    );
+}
+
 // ============================================================================
 // Explicit Template Instantiations
 // ============================================================================
@@ -481,6 +838,24 @@ template void launch_voxelize_to_voxels_fwd<double>(
     cudaStream_t
 );
 
+template void launch_voxelize_to_voxels_mean_var_fwd<float>(
+    const float*, const float*, const float*, const float*,
+    const int32_t*, const int32_t*,
+    float*, float*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
+template void launch_voxelize_to_voxels_mean_var_fwd<double>(
+    const double*, const double*, const double*, const double*,
+    const int32_t*, const int32_t*,
+    double*, double*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
 template void launch_beta_voxelize_to_voxels_fwd<float>(
     const float*, const float*, const float*, const float*,
     const int32_t*, const int32_t*,
@@ -494,6 +869,24 @@ template void launch_beta_voxelize_to_voxels_fwd<double>(
     const double*, const double*, const double*, const double*,
     const int32_t*, const int32_t*,
     double*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
+template void launch_beta_voxelize_to_voxels_mean_var_fwd<float>(
+    const float*, const float*, const float*, const float*, const float*,
+    const int32_t*, const int32_t*,
+    float*, float*,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t,
+    cudaStream_t
+);
+
+template void launch_beta_voxelize_to_voxels_mean_var_fwd<double>(
+    const double*, const double*, const double*, const double*, const double*,
+    const int32_t*, const int32_t*,
+    double*, double*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t,
     cudaStream_t

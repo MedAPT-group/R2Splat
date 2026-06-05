@@ -16,9 +16,26 @@ from gsplat2ct.ops.torch_autograd import (
     GaussianMappingVoxelizer,
     GaussianProjectionRasterizer,
     activate_gaussian_params,
+    activate_uncertainty,
 )
 from gsplat2ct.eval.metric import metric_proj, metric_vol
 from gsplat2ct.model.opacity import opacity_activation
+
+
+def _pearson_corr(a: torch.Tensor, b: torch.Tensor) -> Optional[float]:
+    a = a.reshape(-1).to(torch.float32)
+    b = b.reshape(-1).to(torch.float32)
+    finite = torch.isfinite(a) & torch.isfinite(b)
+    if int(finite.sum().item()) < 2:
+        return None
+    a = a[finite]
+    b = b[finite]
+    a = a - a.mean()
+    b = b - b.mean()
+    denom = a.square().mean().sqrt() * b.square().mean().sqrt()
+    if float(denom.item()) <= 0.0:
+        return None
+    return float((a * b).mean().div(denom).item())
 
 
 class _ParamWrapper:
@@ -47,6 +64,12 @@ class ProjectionEvaluator:
         ssim_window: int = 11,
         primitive_type: str = "gaussian",
         beta_gamma_init: float = 3.5,
+        uncertainty_enabled: bool = False,
+        uncertainty_q_min: float = 1.0e-6,
+        uncertainty_q_max: Optional[float] = None,
+        uncertainty_var_floor: float = 1.0e-6,
+        uncertainty_variance_scale: float = 1.0,
+        detector_uncertainty_var: float = 0.0,
     ):
         self.params = params
         self.scale_min = scale_min
@@ -55,6 +78,12 @@ class ProjectionEvaluator:
         self.ssim_window = ssim_window
         self.primitive_type = str(primitive_type).lower()
         self.beta_gamma_init = float(beta_gamma_init)
+        self.uncertainty_enabled = bool(uncertainty_enabled)
+        self.uncertainty_q_min = float(uncertainty_q_min)
+        self.uncertainty_q_max = uncertainty_q_max
+        self.uncertainty_var_floor = float(uncertainty_var_floor)
+        self.uncertainty_variance_scale = float(uncertainty_variance_scale)
+        self.detector_uncertainty_var = float(detector_uncertainty_var)
 
     @torch.no_grad()
     def evaluate(
@@ -74,6 +103,10 @@ class ProjectionEvaluator:
             "ssim": 0.0,
         }
         metric_count = 0
+        uncertainty_corr_sum = 0.0
+        uncertainty_corr_count = 0
+        uncertainty_std_sum = 0.0
+        uncertainty_std_count = 0
         vis_pairs: List[Tuple[torch.Tensor, torch.Tensor]] = []
         import numpy as np
         vis_indices = set(
@@ -103,6 +136,13 @@ class ProjectionEvaluator:
                 radius_clip=1.0 if self.primitive_type == "beta" else 3.0,
                 primitive_type=self.primitive_type,
             )
+            q = None
+            if self.uncertainty_enabled and self.params.get("raw_uncertainty") is not None:
+                q = activate_uncertainty(
+                    self.params.get("raw_uncertainty").data,
+                    q_min=self.uncertainty_q_min,
+                    q_max=self.uncertainty_q_max,
+                )
             fwd = rasterizer(
                 self.params.get("means").data,
                 covars,
@@ -115,6 +155,7 @@ class ProjectionEvaluator:
                     else None
                 ),
                 beta_gamma_init=self.beta_gamma_init,
+                uncertainty=q,
             )
             # Signed kernels can produce values outside [0, 1]; clamp for evaluation.
             pred = fwd.image.clamp(0.0, 1.0)
@@ -129,6 +170,19 @@ class ProjectionEvaluator:
             metric_sums["ssim"] += float(m["ssim"].item())
             metric_count += 1
 
+            if fwd.variance is not None:
+                pred_std = (
+                    fwd.variance * self.uncertainty_variance_scale
+                    + self.detector_uncertainty_var
+                    + self.uncertainty_var_floor
+                ).clamp_min(0).sqrt()
+                corr = _pearson_corr((fwd.image - gt_squeezed).abs(), pred_std)
+                if corr is not None:
+                    uncertainty_corr_sum += corr
+                    uncertainty_corr_count += 1
+                uncertainty_std_sum += float(pred_std.mean().item())
+                uncertainty_std_count += 1
+
             if idx in vis_indices:
                 vis_pairs.append(
                     (pred[0].cpu(), gt_squeezed[0].cpu())
@@ -138,6 +192,14 @@ class ProjectionEvaluator:
         metrics = {
             k: float(v / denom) for k, v in metric_sums.items()
         }
+        if uncertainty_corr_count > 0:
+            metrics["uncertainty_error_corr"] = float(
+                uncertainty_corr_sum / uncertainty_corr_count
+            )
+        if uncertainty_std_count > 0:
+            metrics["uncertainty_std_mean"] = float(
+                uncertainty_std_sum / uncertainty_std_count
+            )
         return metrics, vis_pairs
 
 
@@ -162,6 +224,11 @@ class VolumeEvaluator:
         ssim_window: int = 11,
         primitive_type: str = "gaussian",
         beta_gamma_init: float = 3.5,
+        uncertainty_enabled: bool = False,
+        uncertainty_q_min: float = 1.0e-6,
+        uncertainty_q_max: Optional[float] = None,
+        uncertainty_var_floor: float = 1.0e-6,
+        uncertainty_variance_scale: float = 1.0,
     ):
         self.params = params
         self.scale_min = scale_min
@@ -170,6 +237,11 @@ class VolumeEvaluator:
         self.ssim_window = ssim_window
         self.primitive_type = str(primitive_type).lower()
         self.beta_gamma_init = float(beta_gamma_init)
+        self.uncertainty_enabled = bool(uncertainty_enabled)
+        self.uncertainty_q_min = float(uncertainty_q_min)
+        self.uncertainty_q_max = uncertainty_q_max
+        self.uncertainty_var_floor = float(uncertainty_var_floor)
+        self.uncertainty_variance_scale = float(uncertainty_variance_scale)
 
     @torch.no_grad()
     def evaluate(
@@ -207,6 +279,13 @@ class VolumeEvaluator:
             radius_clip=1.0 if self.primitive_type == "beta" else 3.0,
             primitive_type=self.primitive_type,
         )
+        q = None
+        if self.uncertainty_enabled and self.params.get("raw_uncertainty") is not None:
+            q = activate_uncertainty(
+                self.params.get("raw_uncertainty").data,
+                q_min=self.uncertainty_q_min,
+                q_max=self.uncertainty_q_max,
+            )
         fwd = voxelizer(
             self.params.get("means").data,
             covars,
@@ -220,8 +299,10 @@ class VolumeEvaluator:
                 else None
             ),
             beta_gamma_init=self.beta_gamma_init,
+            uncertainty=q,
         )
         pred_vol = fwd.volume
+        pred_var = fwd.variance
 
         if pred_vol.ndim >= 3:
             pred_vol = pred_vol.squeeze()
@@ -230,6 +311,8 @@ class VolumeEvaluator:
         # The voxelization kernel outputs axes in reversed order relative to GT.
         if pred_vol.ndim == 3:
             pred_vol = pred_vol.permute(2, 1, 0).contiguous()
+        if pred_var is not None and pred_var.ndim == 3:
+            pred_var = pred_var.permute(2, 1, 0).contiguous()
 
         gt = vol_gt.to(device)
         if pred_vol.shape != gt.shape:
@@ -239,6 +322,8 @@ class VolumeEvaluator:
             )
             pred_vol = pred_vol[slices]
             gt = gt[slices]
+            if pred_var is not None:
+                pred_var = pred_var[slices]
 
         # Signed kernels can produce values outside [0, 1]; clamp for evaluation.
         pred_vol = pred_vol.clamp(0.0, 1.0)
@@ -247,4 +332,13 @@ class VolumeEvaluator:
             pred_vol, gt, window_size=self.ssim_window
         )
         metrics = {k: float(v.item()) for k, v in m.items()}
+        if pred_var is not None:
+            pred_std = (
+                pred_var * self.uncertainty_variance_scale
+                + self.uncertainty_var_floor
+            ).clamp_min(0).sqrt()
+            corr = _pearson_corr((pred_vol - gt).abs(), pred_std)
+            if corr is not None:
+                metrics["uncertainty_error_corr"] = corr
+            metrics["uncertainty_std_mean"] = float(pred_std.mean().item())
         return metrics, pred_vol

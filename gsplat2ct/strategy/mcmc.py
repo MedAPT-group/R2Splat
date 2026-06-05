@@ -85,6 +85,7 @@ class KAMCMCStrategy:
                 gp.quats = gp.quats[keep].contiguous()
                 gp.scale_ori = gp.scale_ori[keep].contiguous()
                 gp.opacity = gp.opacity[keep].contiguous()
+                gp.raw_uncertainty = gp.raw_uncertainty[keep].contiguous()
                 if gp.beta is not None:
                     gp.beta = gp.beta[keep].contiguous()
                 transition.prune_keep = keep.detach().clone()
@@ -124,6 +125,7 @@ class KAMCMCStrategy:
         gp.means[dead_idx] = gp.means[donor]
         gp.quats[dead_idx] = gp.quats[donor]
         gp.scale_ori[dead_idx] = gp.scale_ori[donor]
+        gp.raw_uncertainty[dead_idx] = gp.raw_uncertainty[donor]
         donor_opa = inverse_opacity_activation(
             (opacity_active[donor] * 0.5).clamp_min(self.min_density)
         )
@@ -153,6 +155,7 @@ class KAMCMCStrategy:
         means_new = gp.means[donor] + offsets
         quats_new = gp.quats[donor]
         scale_ori_new = gp.scale_ori[donor]
+        raw_uncertainty_new = gp.raw_uncertainty[donor]
         opacity_active = opacity_activation(gp.opacity)
         opa_new = inverse_opacity_activation(opacity_active[donor] * 0.5)
         gp.opacity[donor] = opa_new
@@ -161,6 +164,9 @@ class KAMCMCStrategy:
         gp.quats = torch.cat([gp.quats, quats_new], dim=0).contiguous()
         gp.scale_ori = torch.cat([gp.scale_ori, scale_ori_new], dim=0).contiguous()
         gp.opacity = torch.cat([gp.opacity, opa_new], dim=0).contiguous()
+        gp.raw_uncertainty = torch.cat(
+            [gp.raw_uncertainty, raw_uncertainty_new], dim=0
+        ).contiguous()
         if gp.beta is not None:
             gp.beta = torch.cat([gp.beta, gp.beta[donor]], dim=0).contiguous()
         return n_add

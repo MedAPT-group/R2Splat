@@ -335,9 +335,12 @@ __global__ void voxelize_to_voxels_bwd_per_gaussian_kernel(
     const int64_t* __restrict__ isect_ids,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    const S* __restrict__ v_render_var,
+    const S* __restrict__ uncertainties,
     vec3<S>* __restrict__ v_means3d,
     S* __restrict__ v_conics,
-    S* __restrict__ v_opacities
+    S* __restrict__ v_opacities,
+    S* __restrict__ v_uncertainties
 ) {
     auto block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
@@ -377,6 +380,7 @@ __global__ void voxelize_to_voxels_bwd_per_gaussian_kernel(
     vec3<S> v_xyz_local = {static_cast<S>(0), static_cast<S>(0), static_cast<S>(0)};
     S v_conic_local[6] = {0, 0, 0, 0, 0, 0};
     S v_opacity_local = static_cast<S>(0);
+    S v_uncertainty_local = static_cast<S>(0);
 
     const uint32_t voxels_per_tile = tile_size * tile_size * tile_size;
     for (uint32_t local_idx = warp.thread_rank(); local_idx < voxels_per_tile; local_idx += warp.size()) {
@@ -405,7 +409,14 @@ __global__ void voxelize_to_voxels_bwd_per_gaussian_kernel(
             continue;
         }
 
-        const S v_O = v_render_output[i * dim1 * dim2 + j * dim2 + k];
+        S v_O = v_render_output[i * dim1 * dim2 + j * dim2 + k];
+        if (v_render_var != nullptr) {
+            const S v_var = v_render_var[i * dim1 * dim2 + j * dim2 + k];
+            v_uncertainty_local += v_var * alpha * alpha;
+            if (uncertainties != nullptr) {
+                v_O += static_cast<S>(2) * uncertainties[g] * alpha * v_var;
+            }
+        }
         const S v_sigma = -v_O * opac * vis;
         const S oI = opac * vis;
 
@@ -424,6 +435,7 @@ __global__ void voxelize_to_voxels_bwd_per_gaussian_kernel(
     gsplat::warpSum(v_xyz_local, warp);
     gsplat::warpSum<6>(v_conic_local, warp);
     gsplat::warpSum(v_opacity_local, warp);
+    gsplat::warpSum(v_uncertainty_local, warp);
 
     if (warp.thread_rank() == 0) {
         S* v_xyz_ptr = reinterpret_cast<S*>(v_means3d) + 3 * g;
@@ -437,6 +449,9 @@ __global__ void voxelize_to_voxels_bwd_per_gaussian_kernel(
             atomicAdd(v_conic_ptr + idx, v_conic_local[idx]);
         }
         atomicAdd(v_opacities + g, v_opacity_local);
+        if (v_uncertainties != nullptr) {
+            atomicAdd(v_uncertainties + g, v_uncertainty_local);
+        }
     }
 }
 
@@ -448,9 +463,12 @@ void launch_voxelize_to_voxels_bwd_per_gaussian(
     const int64_t* __restrict__ isect_ids,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    const S* __restrict__ v_render_var,
+    const S* __restrict__ uncertainties,
     S* __restrict__ v_means3d,
     S* __restrict__ v_conics,
     S* __restrict__ v_opacities,
+    S* __restrict__ v_uncertainties,
     uint32_t N,
     uint32_t n_isects,
     uint32_t dim2,
@@ -485,9 +503,12 @@ void launch_voxelize_to_voxels_bwd_per_gaussian(
         isect_ids,
         flatten_ids,
         v_render_output,
+        v_render_var,
+        uncertainties,
         reinterpret_cast<vec3<S>*>(v_means3d),
         v_conics,
-        v_opacities
+        v_opacities,
+        v_uncertainties
     );
 }
 
@@ -758,10 +779,13 @@ __global__ void beta_voxelize_to_voxels_bwd_per_gaussian_kernel(
     const int64_t* __restrict__ isect_ids,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    const S* __restrict__ v_render_var,
+    const S* __restrict__ uncertainties,
     vec3<S>* __restrict__ v_means3d,
     S* __restrict__ v_conics,
     S* __restrict__ v_opacities,
-    S* __restrict__ v_betas
+    S* __restrict__ v_betas,
+    S* __restrict__ v_uncertainties
 ) {
     auto block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
@@ -803,6 +827,7 @@ __global__ void beta_voxelize_to_voxels_bwd_per_gaussian_kernel(
     S v_conic_local[6] = {0, 0, 0, 0, 0, 0};
     S v_opacity_local = static_cast<S>(0);
     S v_beta_local = static_cast<S>(0);
+    S v_uncertainty_local = static_cast<S>(0);
 
     const uint32_t voxels_per_tile = tile_size * tile_size * tile_size;
     for (uint32_t local_idx = warp.thread_rank(); local_idx < voxels_per_tile; local_idx += warp.size()) {
@@ -839,7 +864,14 @@ __global__ void beta_voxelize_to_voxels_bwd_per_gaussian_kernel(
             continue;
         }
 
-        const S v_O = v_render_output[i * dim1 * dim2 + j * dim2 + k];
+        S v_O = v_render_output[i * dim1 * dim2 + j * dim2 + k];
+        if (v_render_var != nullptr) {
+            const S v_var = v_render_var[i * dim1 * dim2 + j * dim2 + k];
+            v_uncertainty_local += v_var * alpha * alpha;
+            if (uncertainties != nullptr) {
+                v_O += static_cast<S>(2) * uncertainties[g] * alpha * v_var;
+            }
+        }
         const S v_q = -opac * beta * pow(h, beta - static_cast<S>(1)) * v_O;
         const S wx = a * d1 + p * d2 + q * d3;
         const S wy = bb * d2 + p * d1 + r * d3;
@@ -862,6 +894,7 @@ __global__ void beta_voxelize_to_voxels_bwd_per_gaussian_kernel(
     gsplat::warpSum<6>(v_conic_local, warp);
     gsplat::warpSum(v_opacity_local, warp);
     gsplat::warpSum(v_beta_local, warp);
+    gsplat::warpSum(v_uncertainty_local, warp);
 
     if (warp.thread_rank() == 0) {
         S* v_xyz_ptr = reinterpret_cast<S*>(v_means3d) + 3 * g;
@@ -876,6 +909,9 @@ __global__ void beta_voxelize_to_voxels_bwd_per_gaussian_kernel(
         }
         atomicAdd(v_opacities + g, v_opacity_local);
         atomicAdd(v_betas + g, v_beta_local);
+        if (v_uncertainties != nullptr) {
+            atomicAdd(v_uncertainties + g, v_uncertainty_local);
+        }
     }
 }
 
@@ -888,10 +924,13 @@ void launch_beta_voxelize_to_voxels_bwd_per_gaussian(
     const int64_t* __restrict__ isect_ids,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    const S* __restrict__ v_render_var,
+    const S* __restrict__ uncertainties,
     S* __restrict__ v_means3d,
     S* __restrict__ v_conics,
     S* __restrict__ v_opacities,
     S* __restrict__ v_betas,
+    S* __restrict__ v_uncertainties,
     uint32_t N,
     uint32_t n_isects,
     uint32_t dim2,
@@ -927,10 +966,13 @@ void launch_beta_voxelize_to_voxels_bwd_per_gaussian(
         isect_ids,
         flatten_ids,
         v_render_output,
+        v_render_var,
+        uncertainties,
         reinterpret_cast<vec3<S>*>(v_means3d),
         v_conics,
         v_opacities,
-        v_betas
+        v_betas,
+        v_uncertainties
     );
 }
 
@@ -957,8 +999,8 @@ template void launch_voxelize_to_voxels_bwd<double>(
 template void launch_voxelize_to_voxels_bwd_per_gaussian<float>(
     const float*, const float*, const float*,
     const int64_t*, const int32_t*,
-    const float*,
-    float*, float*, float*,
+    const float*, const float*, const float*,
+    float*, float*, float*, float*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t,
     cudaStream_t
@@ -967,8 +1009,8 @@ template void launch_voxelize_to_voxels_bwd_per_gaussian<float>(
 template void launch_voxelize_to_voxels_bwd_per_gaussian<double>(
     const double*, const double*, const double*,
     const int64_t*, const int32_t*,
-    const double*,
-    double*, double*, double*,
+    const double*, const double*, const double*,
+    double*, double*, double*, double*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t,
     cudaStream_t
@@ -997,8 +1039,8 @@ template void launch_beta_voxelize_to_voxels_bwd<double>(
 template void launch_beta_voxelize_to_voxels_bwd_per_gaussian<float>(
     const float*, const float*, const float*, const float*,
     const int64_t*, const int32_t*,
-    const float*,
-    float*, float*, float*, float*,
+    const float*, const float*, const float*,
+    float*, float*, float*, float*, float*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t,
     cudaStream_t
@@ -1007,8 +1049,8 @@ template void launch_beta_voxelize_to_voxels_bwd_per_gaussian<float>(
 template void launch_beta_voxelize_to_voxels_bwd_per_gaussian<double>(
     const double*, const double*, const double*, const double*,
     const int64_t*, const int32_t*,
-    const double*,
-    double*, double*, double*, double*,
+    const double*, const double*, const double*,
+    double*, double*, double*, double*, double*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t,
     cudaStream_t

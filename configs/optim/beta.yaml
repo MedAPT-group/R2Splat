@@ -4,6 +4,7 @@ lr_means: 0.0002
 lr_quats: 0.001
 lr_scale_ori: 0.005
 lr_opacity: 0.01
+lr_uncertainty: 0.005
 lr_beta: 0.0002
 
 beta1: 0.9

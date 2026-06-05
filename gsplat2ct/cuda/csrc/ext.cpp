@@ -33,29 +33,133 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("voxelize_to_voxels_fwd", &gsplat2ct::voxelize_to_voxels_fwd_tensor,
           "Voxelize 3D Gaussians to a voxel grid");
+    m.def("voxelize_to_voxels_mean_var_fwd", &gsplat2ct::voxelize_to_voxels_mean_var_fwd_tensor,
+          "Voxelize 3D Gaussians to voxel mean and propagated variance grids");
     m.def("voxelize_to_voxels_bwd", &gsplat2ct::voxelize_to_voxels_bwd_tensor,
           "Voxelization backward pass");
     m.def("voxelize_to_voxels_bwd_per_gaussian", &gsplat2ct::voxelize_to_voxels_bwd_per_gaussian_tensor,
           "Voxelization per-Gaussian-tile backward pass");
+    m.def("voxelize_to_voxels_mean_var_bwd_per_gaussian",
+          [](const torch::Tensor& means3d,
+             const torch::Tensor& conics,
+             const torch::Tensor& opacities,
+             const torch::Tensor& tile_offsets,
+             const torch::Tensor& isect_ids,
+             const torch::Tensor& flatten_ids,
+             const torch::Tensor& v_render_output,
+             const torch::Tensor& v_render_var,
+             const uint32_t dim2,
+             const uint32_t dim1,
+             const uint32_t dim0,
+             const uint32_t tile_size) {
+              auto empty_uncertainties = torch::empty({0}, opacities.options());
+              return gsplat2ct::voxelize_to_voxels_mean_var_bwd_per_gaussian_tensor(
+                  means3d, conics, opacities, tile_offsets, isect_ids, flatten_ids,
+                  v_render_output, v_render_var, empty_uncertainties, true,
+                  dim2, dim1, dim0, tile_size);
+          },
+          "Voxelization per-Gaussian-tile backward pass with detached variance contribution");
+    m.def("voxelize_to_voxels_mean_var_bwd_per_gaussian", &gsplat2ct::voxelize_to_voxels_mean_var_bwd_per_gaussian_tensor,
+          "Voxelization per-Gaussian-tile backward pass with fused uncertainty gradient");
     m.def("beta_voxelize_to_voxels_fwd", &gsplat2ct::beta_voxelize_to_voxels_fwd_tensor,
           "Voxelize 3D Beta primitives to a voxel grid");
+    m.def("beta_voxelize_to_voxels_mean_var_fwd", &gsplat2ct::beta_voxelize_to_voxels_mean_var_fwd_tensor,
+          "Voxelize 3D Beta primitives to voxel mean and propagated variance grids");
     m.def("beta_voxelize_to_voxels_bwd", &gsplat2ct::beta_voxelize_to_voxels_bwd_tensor,
           "Beta voxelization backward pass");
     m.def("beta_voxelize_to_voxels_bwd_per_gaussian", &gsplat2ct::beta_voxelize_to_voxels_bwd_per_gaussian_tensor,
           "Beta voxelization per-Gaussian-tile backward pass");
+    m.def("beta_voxelize_to_voxels_mean_var_bwd_per_gaussian",
+          [](const torch::Tensor& means3d,
+             const torch::Tensor& conics,
+             const torch::Tensor& opacities,
+             const torch::Tensor& betas,
+             const torch::Tensor& tile_offsets,
+             const torch::Tensor& isect_ids,
+             const torch::Tensor& flatten_ids,
+             const torch::Tensor& v_render_output,
+             const torch::Tensor& v_render_var,
+             const uint32_t dim2,
+             const uint32_t dim1,
+             const uint32_t dim0,
+             const uint32_t tile_size) {
+              auto empty_uncertainties = torch::empty({0}, opacities.options());
+              return gsplat2ct::beta_voxelize_to_voxels_mean_var_bwd_per_gaussian_tensor(
+                  means3d, conics, opacities, betas, tile_offsets, isect_ids,
+                  flatten_ids, v_render_output, v_render_var, empty_uncertainties,
+                  true, dim2, dim1, dim0, tile_size);
+          },
+          "Beta voxelization per-Gaussian-tile backward pass with detached variance contribution");
+    m.def("beta_voxelize_to_voxels_mean_var_bwd_per_gaussian", &gsplat2ct::beta_voxelize_to_voxels_mean_var_bwd_per_gaussian_tensor,
+          "Beta voxelization per-Gaussian-tile backward pass with fused uncertainty gradient");
 
     m.def("rasterize_to_pixels_fwd", &gsplat2ct::rasterize_to_pixels_fwd_tensor,
           "Projection rasterization forward pass");
+    m.def("rasterize_to_pixels_mean_var_fwd", &gsplat2ct::rasterize_to_pixels_mean_var_fwd_tensor,
+          "Projection rasterization forward pass with propagated variance");
+    m.def("rasterize_to_pixels_uncertainty_bwd", &gsplat2ct::rasterize_to_pixels_uncertainty_bwd_tensor,
+          "Projection variance backward pass w.r.t. activated primitive uncertainty");
     m.def("rasterize_to_pixels_bwd", &gsplat2ct::rasterize_to_pixels_bwd_tensor,
           "Projection rasterization backward pass");
     m.def("rasterize_to_pixels_bwd_per_gaussian", &gsplat2ct::rasterize_to_pixels_bwd_per_gaussian_tensor,
           "Projection rasterization per-Gaussian-tile backward pass");
+    m.def("rasterize_to_pixels_mean_var_bwd_per_gaussian",
+          [](const torch::Tensor& means2d,
+             const torch::Tensor& conics,
+             const torch::Tensor& opacities,
+             const torch::Tensor& mus,
+             const torch::Tensor& tile_offsets,
+             const torch::Tensor& isect_ids,
+             const torch::Tensor& flatten_ids,
+             const torch::Tensor& v_render_output,
+             const torch::Tensor& v_render_var,
+             const uint32_t dim1,
+             const uint32_t dim0,
+             const uint32_t tile_size,
+             const bool absgrad) {
+              auto empty_uncertainties = torch::empty({0}, opacities.options());
+              return gsplat2ct::rasterize_to_pixels_mean_var_bwd_per_gaussian_tensor(
+                  means2d, conics, opacities, mus, tile_offsets, isect_ids,
+                  flatten_ids, v_render_output, v_render_var, empty_uncertainties,
+                  true, dim1, dim0, tile_size, absgrad);
+          },
+          "Projection rasterization per-Gaussian-tile backward pass with detached variance contribution");
+    m.def("rasterize_to_pixels_mean_var_bwd_per_gaussian", &gsplat2ct::rasterize_to_pixels_mean_var_bwd_per_gaussian_tensor,
+          "Projection rasterization per-Gaussian-tile backward pass with fused uncertainty gradient");
     m.def("beta_rasterize_to_pixels_fwd", &gsplat2ct::beta_rasterize_to_pixels_fwd_tensor,
           "Beta projection rasterization forward pass");
+    m.def("beta_rasterize_to_pixels_mean_var_fwd", &gsplat2ct::beta_rasterize_to_pixels_mean_var_fwd_tensor,
+          "Beta projection rasterization forward pass with propagated variance");
+    m.def("beta_rasterize_to_pixels_uncertainty_bwd", &gsplat2ct::beta_rasterize_to_pixels_uncertainty_bwd_tensor,
+          "Beta projection variance backward pass w.r.t. activated primitive uncertainty");
     m.def("beta_rasterize_to_pixels_bwd", &gsplat2ct::beta_rasterize_to_pixels_bwd_tensor,
           "Beta projection rasterization backward pass");
     m.def("beta_rasterize_to_pixels_bwd_per_gaussian", &gsplat2ct::beta_rasterize_to_pixels_bwd_per_gaussian_tensor,
           "Beta projection rasterization per-Gaussian-tile backward pass");
+    m.def("beta_rasterize_to_pixels_mean_var_bwd_per_gaussian",
+          [](const torch::Tensor& means2d,
+             const torch::Tensor& conics,
+             const torch::Tensor& opacities,
+             const torch::Tensor& mus,
+             const torch::Tensor& betas,
+             const torch::Tensor& tile_offsets,
+             const torch::Tensor& isect_ids,
+             const torch::Tensor& flatten_ids,
+             const torch::Tensor& v_render_output,
+             const torch::Tensor& v_render_var,
+             const uint32_t dim1,
+             const uint32_t dim0,
+             const uint32_t tile_size,
+             const bool absgrad) {
+              auto empty_uncertainties = torch::empty({0}, opacities.options());
+              return gsplat2ct::beta_rasterize_to_pixels_mean_var_bwd_per_gaussian_tensor(
+                  means2d, conics, opacities, mus, betas, tile_offsets, isect_ids,
+                  flatten_ids, v_render_output, v_render_var, empty_uncertainties,
+                  true, dim1, dim0, tile_size, absgrad);
+          },
+          "Beta projection rasterization per-Gaussian-tile backward pass with detached variance contribution");
+    m.def("beta_rasterize_to_pixels_mean_var_bwd_per_gaussian", &gsplat2ct::beta_rasterize_to_pixels_mean_var_bwd_per_gaussian_tensor,
+          "Beta projection rasterization per-Gaussian-tile backward pass with fused uncertainty gradient");
 
     m.def("conics_mu_fwd", &gsplat2ct::conics_mu_fwd_tensor,
           "Conics/mu forward pass");

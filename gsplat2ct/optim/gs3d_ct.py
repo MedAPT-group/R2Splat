@@ -6,7 +6,7 @@ from gsplat2ct.ops.data import Params
 from .base import FirstOrderConfig, FirstOrderOptimizerBase
 
 
-PARAM_NAMES = ["means", "quats", "scale_ori", "opacity"]
+PARAM_NAMES = ["means", "quats", "scale_ori", "opacity", "raw_uncertainty"]
 
 
 def _renormalize_quats(params: Params, eps: float = 1e-12) -> None:

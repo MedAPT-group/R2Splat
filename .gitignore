@@ -38,3 +38,4 @@ logs
 # ============== wandb / sweep ==============
 wandb/
 slurm*.out
+slurm_logs

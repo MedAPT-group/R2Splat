@@ -363,11 +363,14 @@ __global__ void rasterize_to_pixels_bwd_per_gaussian_kernel(
     const int64_t* __restrict__ isect_ids,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    const S* __restrict__ v_render_var,
+    const S* __restrict__ uncertainties,
     vec2<S>* __restrict__ v_means2d_abs,
     vec2<S>* __restrict__ v_means2d,
     vec3<S>* __restrict__ v_conics,
     S* __restrict__ v_opacities,
-    S* __restrict__ v_mus
+    S* __restrict__ v_mus,
+    S* __restrict__ v_uncertainties
 ) {
     auto block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
@@ -401,12 +404,17 @@ __global__ void rasterize_to_pixels_bwd_per_gaussian_kernel(
     const S mu = mus[g];
     const S* __restrict__ v_render_camera =
         v_render_output + static_cast<uint64_t>(camera_id) * dim0 * dim1;
+    const S* __restrict__ v_render_var_camera =
+        v_render_var == nullptr
+            ? nullptr
+            : v_render_var + static_cast<uint64_t>(camera_id) * dim0 * dim1;
 
     vec2<S> v_xy_local = {static_cast<S>(0), static_cast<S>(0)};
     vec2<S> v_xy_abs_local = {static_cast<S>(0), static_cast<S>(0)};
     vec3<S> v_conic_local = {static_cast<S>(0), static_cast<S>(0), static_cast<S>(0)};
     S v_opacity_local = static_cast<S>(0);
     S v_mu_local = static_cast<S>(0);
+    S v_uncertainty_local = static_cast<S>(0);
 
     const uint32_t pixels_per_tile = tile_size * tile_size;
     for (uint32_t local_idx = warp.thread_rank(); local_idx < pixels_per_tile; local_idx += warp.size()) {
@@ -431,7 +439,15 @@ __global__ void rasterize_to_pixels_bwd_per_gaussian_kernel(
             continue;
         }
 
-        const S v_render = v_render_camera[i * dim1 + j];
+        S v_render = v_render_camera[i * dim1 + j];
+        const int32_t primitive_id = g % static_cast<int32_t>(N);
+        if (v_render_var_camera != nullptr) {
+            const S v_var = v_render_var_camera[i * dim1 + j];
+            v_uncertainty_local += v_var * alpha * alpha;
+            if (uncertainties != nullptr) {
+                v_render += static_cast<S>(2) * uncertainties[primitive_id] * alpha * v_var;
+            }
+        }
         const S v_sigma = -v_render * alpha;
         const vec2<S> v_xy_pix = {
             -v_sigma * (conic.x * delta.x + conic.y * delta.y),
@@ -458,6 +474,7 @@ __global__ void rasterize_to_pixels_bwd_per_gaussian_kernel(
     gsplat::warpSum(v_conic_local, warp);
     gsplat::warpSum(v_opacity_local, warp);
     gsplat::warpSum(v_mu_local, warp);
+    gsplat::warpSum(v_uncertainty_local, warp);
 
     if (warp.thread_rank() == 0) {
         S* v_xy_ptr = reinterpret_cast<S*>(v_means2d) + 2 * g;
@@ -476,6 +493,10 @@ __global__ void rasterize_to_pixels_bwd_per_gaussian_kernel(
         atomicAdd(v_conic_ptr + 2, v_conic_local.z);
         atomicAdd(v_opacities + g, v_opacity_local);
         atomicAdd(v_mus + g, v_mu_local);
+        if (v_uncertainties != nullptr) {
+            const int32_t primitive_id = g % static_cast<int32_t>(N);
+            atomicAdd(v_uncertainties + primitive_id, v_uncertainty_local);
+        }
     }
 }
 
@@ -488,11 +509,14 @@ void launch_rasterize_to_pixels_bwd_per_gaussian(
     const int64_t* __restrict__ isect_ids,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    const S* __restrict__ v_render_var,
+    const S* __restrict__ uncertainties,
     S* __restrict__ v_means2d_abs,
     S* __restrict__ v_means2d,
     S* __restrict__ v_conics,
     S* __restrict__ v_opacities,
     S* __restrict__ v_mus,
+    S* __restrict__ v_uncertainties,
     uint32_t C,
     uint32_t N,
     uint32_t n_isects,
@@ -526,11 +550,14 @@ void launch_rasterize_to_pixels_bwd_per_gaussian(
         isect_ids,
         flatten_ids,
         v_render_output,
+        v_render_var,
+        uncertainties,
         reinterpret_cast<vec2<S>*>(v_means2d_abs),
         reinterpret_cast<vec2<S>*>(v_means2d),
         reinterpret_cast<vec3<S>*>(v_conics),
         v_opacities,
-        v_mus
+        v_mus,
+        v_uncertainties
     );
 }
 
@@ -804,12 +831,15 @@ __global__ void beta_rasterize_to_pixels_bwd_per_gaussian_kernel(
     const int64_t* __restrict__ isect_ids,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    const S* __restrict__ v_render_var,
+    const S* __restrict__ uncertainties,
     vec2<S>* __restrict__ v_means2d_abs,
     vec2<S>* __restrict__ v_means2d,
     vec3<S>* __restrict__ v_conics,
     S* __restrict__ v_opacities,
     S* __restrict__ v_mus,
-    S* __restrict__ v_betas
+    S* __restrict__ v_betas,
+    S* __restrict__ v_uncertainties
 ) {
     auto block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
@@ -844,6 +874,10 @@ __global__ void beta_rasterize_to_pixels_bwd_per_gaussian_kernel(
     const S beta = betas[g];
     const S* __restrict__ v_render_camera =
         v_render_output + static_cast<uint64_t>(camera_id) * dim0 * dim1;
+    const S* __restrict__ v_render_var_camera =
+        v_render_var == nullptr
+            ? nullptr
+            : v_render_var + static_cast<uint64_t>(camera_id) * dim0 * dim1;
 
     vec2<S> v_xy_local = {static_cast<S>(0), static_cast<S>(0)};
     vec2<S> v_xy_abs_local = {static_cast<S>(0), static_cast<S>(0)};
@@ -851,6 +885,7 @@ __global__ void beta_rasterize_to_pixels_bwd_per_gaussian_kernel(
     S v_opacity_local = static_cast<S>(0);
     S v_mu_local = static_cast<S>(0);
     S v_beta_local = static_cast<S>(0);
+    S v_uncertainty_local = static_cast<S>(0);
 
     const uint32_t pixels_per_tile = tile_size * tile_size;
     for (uint32_t local_idx = warp.thread_rank(); local_idx < pixels_per_tile; local_idx += warp.size()) {
@@ -880,7 +915,15 @@ __global__ void beta_rasterize_to_pixels_bwd_per_gaussian_kernel(
             continue;
         }
 
-        const S v_render = v_render_camera[i * dim1 + j];
+        S v_render = v_render_camera[i * dim1 + j];
+        const int32_t primitive_id = g % static_cast<int32_t>(N);
+        if (v_render_var_camera != nullptr) {
+            const S v_var = v_render_var_camera[i * dim1 + j];
+            v_uncertainty_local += v_var * alpha * alpha;
+            if (uncertainties != nullptr) {
+                v_render += static_cast<S>(2) * uncertainties[primitive_id] * alpha * v_var;
+            }
+        }
         const S v_d2 = -opac * mu * beta * pow(h, beta - static_cast<S>(1)) * v_render;
         const vec2<S> v_xy_pix = {
             static_cast<S>(2) * v_d2 * (conic.x * delta.x + conic.y * delta.y),
@@ -909,6 +952,7 @@ __global__ void beta_rasterize_to_pixels_bwd_per_gaussian_kernel(
     gsplat::warpSum(v_opacity_local, warp);
     gsplat::warpSum(v_mu_local, warp);
     gsplat::warpSum(v_beta_local, warp);
+    gsplat::warpSum(v_uncertainty_local, warp);
 
     if (warp.thread_rank() == 0) {
         S* v_xy_ptr = reinterpret_cast<S*>(v_means2d) + 2 * g;
@@ -928,6 +972,10 @@ __global__ void beta_rasterize_to_pixels_bwd_per_gaussian_kernel(
         atomicAdd(v_opacities + g, v_opacity_local);
         atomicAdd(v_mus + g, v_mu_local);
         atomicAdd(v_betas + g, v_beta_local);
+        if (v_uncertainties != nullptr) {
+            const int32_t primitive_id = g % static_cast<int32_t>(N);
+            atomicAdd(v_uncertainties + primitive_id, v_uncertainty_local);
+        }
     }
 }
 
@@ -941,12 +989,15 @@ void launch_beta_rasterize_to_pixels_bwd_per_gaussian(
     const int64_t* __restrict__ isect_ids,
     const int32_t* __restrict__ flatten_ids,
     const S* __restrict__ v_render_output,
+    const S* __restrict__ v_render_var,
+    const S* __restrict__ uncertainties,
     S* __restrict__ v_means2d_abs,
     S* __restrict__ v_means2d,
     S* __restrict__ v_conics,
     S* __restrict__ v_opacities,
     S* __restrict__ v_mus,
     S* __restrict__ v_betas,
+    S* __restrict__ v_uncertainties,
     uint32_t C,
     uint32_t N,
     uint32_t n_isects,
@@ -981,12 +1032,15 @@ void launch_beta_rasterize_to_pixels_bwd_per_gaussian(
         isect_ids,
         flatten_ids,
         v_render_output,
+        v_render_var,
+        uncertainties,
         reinterpret_cast<vec2<S>*>(v_means2d_abs),
         reinterpret_cast<vec2<S>*>(v_means2d),
         reinterpret_cast<vec3<S>*>(v_conics),
         v_opacities,
         v_mus,
-        v_betas
+        v_betas,
+        v_uncertainties
     );
 }
 
@@ -1015,8 +1069,8 @@ template void launch_rasterize_to_pixels_bwd<double>(
 template void launch_rasterize_to_pixels_bwd_per_gaussian<float>(
     const float*, const float*, const float*, const float*,
     const int64_t*, const int32_t*,
-    const float*,
-    float*, float*, float*, float*, float*,
+    const float*, const float*, const float*,
+    float*, float*, float*, float*, float*, float*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     cudaStream_t
 );
@@ -1024,8 +1078,8 @@ template void launch_rasterize_to_pixels_bwd_per_gaussian<float>(
 template void launch_rasterize_to_pixels_bwd_per_gaussian<double>(
     const double*, const double*, const double*, const double*,
     const int64_t*, const int32_t*,
-    const double*,
-    double*, double*, double*, double*, double*,
+    const double*, const double*, const double*,
+    double*, double*, double*, double*, double*, double*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     cudaStream_t
 );
@@ -1051,8 +1105,8 @@ template void launch_beta_rasterize_to_pixels_bwd<double>(
 template void launch_beta_rasterize_to_pixels_bwd_per_gaussian<float>(
     const float*, const float*, const float*, const float*, const float*,
     const int64_t*, const int32_t*,
-    const float*,
-    float*, float*, float*, float*, float*, float*,
+    const float*, const float*, const float*,
+    float*, float*, float*, float*, float*, float*, float*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     cudaStream_t
 );
@@ -1060,8 +1114,8 @@ template void launch_beta_rasterize_to_pixels_bwd_per_gaussian<float>(
 template void launch_beta_rasterize_to_pixels_bwd_per_gaussian<double>(
     const double*, const double*, const double*, const double*, const double*,
     const int64_t*, const int32_t*,
-    const double*,
-    double*, double*, double*, double*, double*, double*,
+    const double*, const double*, const double*,
+    double*, double*, double*, double*, double*, double*, double*,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     cudaStream_t
 );

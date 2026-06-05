@@ -93,6 +93,37 @@ class DefaultStrategy:
         self.max_gaussians = int(getattr(cfg_obj, "max_gaussians", 0))
 
         self.split_scales_div = float(getattr(cfg_obj, "split_scales_div", 1.6))
+        self.uncertainty_grad_weight = float(
+            getattr(cfg_obj, "uncertainty_grad_weight", 0.0)
+        )
+        self.uncertainty_grad_mode = str(
+            getattr(cfg_obj, "uncertainty_grad_mode", "std")
+        ).lower()
+        if self.uncertainty_grad_mode not in {"std", "q"}:
+            raise ValueError(
+                "strategy.uncertainty_grad_mode must be one of ['std', 'q']"
+            )
+        self.uncertainty_grad_scale = float(
+            getattr(cfg_obj, "uncertainty_grad_scale", 1.0)
+        )
+        self.uncertainty_grad_max_multiplier = float(
+            getattr(cfg_obj, "uncertainty_grad_max_multiplier", 0.0)
+        )
+        self.split_sampling = str(getattr(cfg_obj, "split_sampling", "random")).lower()
+        if self.split_sampling not in {"random", "long_axis"}:
+            raise ValueError(
+                "strategy.split_sampling must be one of ['random', 'long_axis']"
+            )
+        self.split_long_axis_offset = float(
+            getattr(cfg_obj, "split_long_axis_offset", 0.5)
+        )
+        self.new_uncertainty_mode = str(
+            getattr(cfg_obj, "new_uncertainty_mode", "inherit")
+        ).lower()
+        if self.new_uncertainty_mode not in {"inherit", "init"}:
+            raise ValueError(
+                "strategy.new_uncertainty_mode must be one of ['inherit', 'init']"
+            )
 
         self._grad2d: Optional[torch.Tensor] = None
         self._count: Optional[torch.Tensor] = None
@@ -178,6 +209,7 @@ class DefaultStrategy:
         scale_min: float,
         scale_max: float,
         grow_scale3d_abs: Optional[float] = None,
+        uncertainty: Optional[torch.Tensor] = None,
     ) -> StrategyOutput:
         N = gp.num_gaussians
         device = gp.means.device
@@ -188,6 +220,24 @@ class DefaultStrategy:
             accum = (self._grad2d / self._count.clamp_min(1.0)).to(
                 device=device, dtype=gp.means.dtype
             )
+        if (
+            self.uncertainty_grad_weight != 0.0
+            and uncertainty is not None
+            and uncertainty.numel() == N
+        ):
+            unc = uncertainty.detach().to(device=device, dtype=accum.dtype).reshape(-1)
+            if self.uncertainty_grad_mode == "std":
+                unc = unc.clamp_min(0).sqrt()
+            else:
+                unc = unc.clamp_min(0)
+            if self.uncertainty_grad_scale > 0.0:
+                unc = unc / float(self.uncertainty_grad_scale)
+            multiplier = 1.0 + float(self.uncertainty_grad_weight) * unc
+            if self.uncertainty_grad_max_multiplier > 0.0:
+                multiplier = multiplier.clamp(
+                    max=float(self.uncertainty_grad_max_multiplier)
+                )
+            accum = accum * multiplier
 
         is_grad_high = accum > self.grow_grad2d
 
@@ -242,6 +292,9 @@ class DefaultStrategy:
                 means_new = gp.means[sel]
                 quats_new = gp.quats[sel]
                 scale_ori_new = gp.scale_ori[sel]
+                raw_uncertainty_new = self._make_new_uncertainty(
+                    gp, int(sel.numel()), like=gp.raw_uncertainty[sel]
+                )
                 beta_new = gp.beta[sel] if gp.beta is not None else None
                 opa_new = inverse_opacity_activation(
                     opacity_activation(gp.opacity[sel]) * 0.5
@@ -251,6 +304,9 @@ class DefaultStrategy:
                 gp.quats = torch.cat([gp.quats, quats_new], dim=0).contiguous()
                 gp.scale_ori = torch.cat([gp.scale_ori, scale_ori_new], dim=0).contiguous()
                 gp.opacity = torch.cat([gp.opacity, opa_new], dim=0).contiguous()
+                gp.raw_uncertainty = torch.cat(
+                    [gp.raw_uncertainty, raw_uncertainty_new], dim=0
+                ).contiguous()
                 if gp.beta is not None and beta_new is not None:
                     gp.beta = torch.cat([gp.beta, beta_new], dim=0).contiguous()
                 self._cat_running_stats_duplicate(sel)
@@ -273,8 +329,19 @@ class DefaultStrategy:
                 quats = quats / quats.norm(dim=-1, keepdim=True).clamp_min(1e-12)
                 scales = torch.sigmoid(gp.scale_ori[sel]) * (scale_max - scale_min) + scale_min
                 R = _quat_to_rotmat(quats)
-                noise = torch.randn((2, sel.numel(), 3), device=device, dtype=scales.dtype)
-                samples = torch.einsum("nij,nj,bnj->bni", R, scales, noise)
+                if self.split_sampling == "long_axis":
+                    axis = scales.argmax(dim=-1)
+                    local = torch.zeros((2, sel.numel(), 3), device=device, dtype=scales.dtype)
+                    offsets = (
+                        scales.gather(1, axis[:, None]).squeeze(1)
+                        * float(self.split_long_axis_offset)
+                    )
+                    local[0, torch.arange(sel.numel(), device=device), axis] = offsets
+                    local[1, torch.arange(sel.numel(), device=device), axis] = -offsets
+                    samples = torch.einsum("nij,bnj->bni", R, local)
+                else:
+                    noise = torch.randn((2, sel.numel(), 3), device=device, dtype=scales.dtype)
+                    samples = torch.einsum("nij,nj,bnj->bni", R, scales, noise)
                 means_split = (gp.means[sel].unsqueeze(0) + samples).reshape(-1, 3)
 
                 target_scales = (scales / self.split_scales_div).clamp_min(scale_min + 1e-6)
@@ -286,6 +353,9 @@ class DefaultStrategy:
                 opa_split = inverse_opacity_activation(
                     opacity_activation(gp.opacity[sel]) * 0.5
                 ).repeat(2)
+                raw_uncertainty_split = self._make_new_uncertainty(
+                    gp, int(sel.numel()) * 2, like=gp.raw_uncertainty[sel].repeat(2)
+                )
                 beta_split = gp.beta[sel].repeat(2) if gp.beta is not None else None
 
                 keep_parent = torch.ones(gp.num_gaussians, dtype=torch.bool, device=device)
@@ -297,6 +367,9 @@ class DefaultStrategy:
                     [gp.scale_ori[keep_parent], scale_ori_split], dim=0
                 ).contiguous()
                 gp.opacity = torch.cat([gp.opacity[keep_parent], opa_split], dim=0).contiguous()
+                gp.raw_uncertainty = torch.cat(
+                    [gp.raw_uncertainty[keep_parent], raw_uncertainty_split], dim=0
+                ).contiguous()
                 if gp.beta is not None and beta_split is not None:
                     gp.beta = torch.cat([gp.beta[keep_parent], beta_split], dim=0).contiguous()
                 self._running_stats_split(keep_parent, sel)
@@ -328,6 +401,7 @@ class DefaultStrategy:
             gp.quats = gp.quats[keep].contiguous()
             gp.scale_ori = gp.scale_ori[keep].contiguous()
             gp.opacity = gp.opacity[keep].contiguous()
+            gp.raw_uncertainty = gp.raw_uncertainty[keep].contiguous()
             if gp.beta is not None:
                 gp.beta = gp.beta[keep].contiguous()
             self._resize_running_stats(keep)
@@ -341,6 +415,23 @@ class DefaultStrategy:
             )
 
         return changed, transition
+
+    def _make_new_uncertainty(
+        self,
+        gp: GaussianParams,
+        n_new: int,
+        *,
+        like: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.new_uncertainty_mode == "inherit":
+            return like
+        return GaussianParams._make_raw_uncertainty(
+            int(n_new),
+            dtype=like.dtype,
+            device=like.device,
+            q0=float(gp.init_uncertainty),
+            q_min=float(gp.uncertainty_q_min),
+        )
 
     def _resize_running_stats(self, keep: torch.Tensor) -> None:
         if self._grad2d is None or self._grad2d.numel() != keep.numel():
