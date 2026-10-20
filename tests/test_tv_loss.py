@@ -6,7 +6,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 
 def test_volume_tv_matches_edge_mean_reference():
-    from gsplat2ct.cuda._wrapper import volume_loss_bwd, volume_loss_fwd
+    from r2splat.cuda._wrapper import volume_loss_bwd, volume_loss_fwd
 
     torch.manual_seed(0)
     volume = torch.randn(1, 4, 5, 6, device="cuda", requires_grad=True)

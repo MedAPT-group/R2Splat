@@ -6,7 +6,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 
 def test_beta_rasterize_forward_matches_reference():
-    from gsplat2ct.cuda._wrapper import beta_rasterize_to_pixels_fwd
+    from r2splat.cuda._wrapper import beta_rasterize_to_pixels_fwd
 
     device = "cuda"
     means2d = torch.tensor([[[2.5, 2.5]]], device=device)
@@ -39,7 +39,7 @@ def test_beta_rasterize_forward_matches_reference():
 
 
 def test_beta_voxelize_forward_matches_reference_and_backward_shapes():
-    from gsplat2ct.cuda._wrapper import (
+    from r2splat.cuda._wrapper import (
         beta_voxelize_to_voxels_bwd,
         beta_voxelize_to_voxels_fwd,
     )
@@ -90,7 +90,7 @@ def test_beta_voxelize_forward_matches_reference_and_backward_shapes():
 
 
 def test_per_primitive_backward_matches_pixel_backward():
-    from gsplat2ct.cuda._wrapper import (
+    from r2splat.cuda._wrapper import (
         beta_rasterize_to_pixels_bwd,
         beta_rasterize_to_pixels_bwd_per_gaussian,
         beta_voxelize_to_voxels_bwd,

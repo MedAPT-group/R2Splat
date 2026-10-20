@@ -47,7 +47,7 @@ def _beta_raster_ref(means2d, conics, opacity, mu, beta, h=5, w=5):
 
 
 def test_raster_uncertainty_forward_and_q_backward_match_reference():
-    from gsplat2ct.cuda._wrapper import (
+    from r2splat.cuda._wrapper import (
         beta_rasterize_to_pixels_mean_var_bwd_per_gaussian,
         beta_rasterize_to_pixels_mean_var_fwd,
         beta_rasterize_to_pixels_uncertainty_bwd,
@@ -124,7 +124,7 @@ def test_raster_uncertainty_forward_and_q_backward_match_reference():
 
 
 def test_voxel_uncertainty_forward_matches_reference():
-    from gsplat2ct.cuda._wrapper import (
+    from r2splat.cuda._wrapper import (
         beta_voxelize_to_voxels_mean_var_bwd_per_gaussian,
         beta_voxelize_to_voxels_mean_var_fwd,
         voxelize_to_voxels_mean_var_bwd_per_gaussian,
@@ -205,299 +205,107 @@ def test_voxel_uncertainty_forward_matches_reference():
     assert torch.allclose(fused[-1], (v_var * ref.square()).sum().reshape(1), atol=2e-5, rtol=2e-5)
 
 
-def test_raster_uncertainty_autograd_raw_gradient_matches_reference():
-    from gsplat2ct.ops.torch_autograd import _RasterizeMeanVarFunction
+def _voxel_reference(means, conics, opacity, beta=None):
+    axis = torch.arange(5, device=means.device, dtype=means.dtype) + 0.5
+    zz, yy, xx = torch.meshgrid(axis, axis, axis, indexing="ij")
+    dx, dy, dz = xx - means[0, 0], yy - means[0, 1], zz - means[0, 2]
+    c = conics[0]
+    distance = (c[0] * dx.square() + 2 * c[1] * dx * dy + 2 * c[2] * dx * dz
+                + c[3] * dy.square() + 2 * c[4] * dy * dz + c[5] * dz.square())
+    if beta is None:
+        contribution = opacity[0] * torch.exp(-0.5 * distance)
+        valid = (distance >= 0) & (contribution.abs() >= 1e-6)
+    else:
+        contribution = opacity[0] * (1 - distance).clamp_min(0).pow(beta[0])
+        valid = (distance >= 0) & (distance < 1) & (contribution.abs() >= 1e-5)
+    return torch.where(valid, contribution, torch.zeros_like(contribution))
 
-    device = "cuda"
+
+@pytest.mark.parametrize("operation", ["rasterize", "voxelize"])
+def test_uncertainty_explicit_raw_chain_rule_matches_reference(operation):
+    from r2splat.cuda import _wrapper
+
     tile_offsets, flatten_ids, isect_ids = _single_tile()
-    means2d = torch.tensor([[[2.5, 2.5]]], device=device)
-    conics = torch.tensor([[[1.0, 0.1, 1.2]]], device=device)
-    opacity = torch.tensor([[2.0]], device=device)
-    mu = torch.tensor([[3.0]], device=device)
-    raw_q = torch.tensor([-2.0], device=device, requires_grad=True)
-    q_min = 1.0e-6
-    q = F.softplus(raw_q) + q_min
-
-    image, variance = _RasterizeMeanVarFunction.apply(
-        means2d,
-        conics,
-        opacity,
-        mu,
-        torch.empty(0, device=device),
-        q,
-        tile_offsets,
-        flatten_ids,
-        isect_ids,
-        5,
-        5,
-        8,
-        "gaussian",
-        False,
-        False,
-        True,
-    )
-    v_var = torch.randn_like(variance)
-    loss = (variance * v_var).sum()
-    loss.backward()
-
-    ref = _gaussian_raster_ref(means2d, conics, opacity, mu)
-    expected = torch.sigmoid(raw_q.detach()) * (v_var * ref.square()).sum()
-    assert torch.allclose(image, ref, atol=1e-6, rtol=1e-6)
-    assert torch.allclose(raw_q.grad, expected.reshape_as(raw_q), atol=2e-5, rtol=2e-5)
+    raw_q = torch.tensor([-2.0], device="cuda")
+    q = F.softplus(raw_q) + 1e-6
+    if operation == "rasterize":
+        means = q.new_tensor([[[2.5, 2.5]]])
+        values = [means, q.new_tensor([[[1.0, 0.1, 1.2]]]),
+                  q.new_tensor([[2.0]]), q.new_tensor([[3.0]])]
+        stem, dimensions, options = "rasterize_to_pixels", [5, 5, 8], [False]
+        reference = _gaussian_raster_ref(*values)
+    else:
+        means = q.new_tensor([[2.5, 2.5, 2.5]])
+        values = [means, q.new_tensor([[1.0, 0.0, 0.0, 1.0, 0.0, 1.0]]), q.new_tensor([2.0])]
+        stem, dimensions, options = "voxelize_to_voxels", [5, 5, 5, 8], []
+        reference = _voxel_reference(*values)
+    forward = getattr(_wrapper, stem + "_mean_var_fwd")
+    backward = getattr(_wrapper, stem + "_mean_var_bwd_per_gaussian")
+    mean, variance = forward(*values, q, tile_offsets, flatten_ids, *dimensions)
+    weights = torch.linspace(-0.7, 1.1, variance.numel(), device=q.device).reshape_as(variance)
+    gradients = backward(*values, tile_offsets, isect_ids, flatten_ids,
+                         torch.zeros_like(mean), weights, q, True, *dimensions, *options)
+    actual_raw_gradient = gradients[-1] * raw_q.sigmoid()
+    expected = raw_q.sigmoid() * (weights * reference.square()).sum()
+    torch.testing.assert_close(mean, reference, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(actual_raw_gradient, expected.reshape_as(raw_q), atol=2e-5, rtol=2e-5)
+    # Numerical perturbation of caller-owned raw uncertainty checks the full chain.
+    step = 1e-3
+    _, plus = forward(*values, F.softplus(raw_q + step) + 1e-6,
+                      tile_offsets, flatten_ids, *dimensions)
+    _, minus = forward(*values, F.softplus(raw_q - step) + 1e-6,
+                       tile_offsets, flatten_ids, *dimensions)
+    numeric = ((plus - minus) * weights).sum().reshape_as(raw_q) / (2 * step)
+    torch.testing.assert_close(actual_raw_gradient, numeric, atol=2e-4, rtol=2e-3)
 
 
-def test_voxel_uncertainty_autograd_raw_gradient_matches_reference():
-    from gsplat2ct.ops.torch_autograd import _VoxelizeMeanVarFunction
+@pytest.mark.parametrize("operation", ["rasterize", "voxelize"])
+@pytest.mark.parametrize("primitive", ["gaussian", "beta"])
+@pytest.mark.parametrize("detach", [False, True])
+def test_fused_uncertainty_vjp_matches_independent_geometry_reference(operation, primitive, detach):
+    from r2splat.cuda import _wrapper
 
-    device = "cuda"
     tile_offsets, flatten_ids, isect_ids = _single_tile()
-    means3d = torch.tensor([[2.5, 2.5, 2.5]], device=device)
-    conics = torch.tensor([[1.0, 0.0, 0.0, 1.0, 0.0, 1.0]], device=device)
-    opacity = torch.tensor([2.0], device=device)
-    raw_q = torch.tensor([-2.0], device=device, requires_grad=True)
-    q_min = 1.0e-6
-    q = F.softplus(raw_q) + q_min
-
-    volume, variance = _VoxelizeMeanVarFunction.apply(
-        means3d,
-        conics,
-        opacity,
-        torch.empty(0, device=device),
-        q,
-        tile_offsets,
-        flatten_ids,
-        isect_ids,
-        5,
-        5,
-        5,
-        8,
-        "gaussian",
-        False,
-        True,
+    q = torch.tensor([0.25], device="cuda")
+    if operation == "rasterize":
+        values = [q.new_tensor([[[2.3, 2.6]]]), q.new_tensor([[[0.22, 0.015, 0.18]]]),
+                  q.new_tensor([[2.0]]), q.new_tensor([[3.0]])]
+        stem, dimensions, options = "rasterize_to_pixels", [5, 5, 8], [False]
+        if primitive == "beta":
+            values.append(q.new_tensor([[3.7]]))
+        reference_fn = _beta_raster_ref if primitive == "beta" else _gaussian_raster_ref
+    else:
+        values = [q.new_tensor([[2.3, 2.6, 2.4]]),
+                  q.new_tensor([[0.3, 0.01, -0.005, 0.25, 0.008, 0.22]]), q.new_tensor([2.0])]
+        stem, dimensions, options = "voxelize_to_voxels", [5, 5, 5, 8], []
+        if primitive == "beta":
+            values.append(q.new_tensor([3.5]))
+        reference_fn = _voxel_reference
+    if primitive == "beta":
+        stem = "beta_" + stem
+    mean, variance = getattr(_wrapper, stem + "_mean_var_fwd")(
+        *values, q, tile_offsets, flatten_ids, *dimensions
     )
-    v_var = torch.randn_like(variance)
-    loss = (variance * v_var).sum()
-    loss.backward()
-
-    zz, yy, xx = torch.meshgrid(
-        torch.arange(5, device=device, dtype=torch.float32) + 0.5,
-        torch.arange(5, device=device, dtype=torch.float32) + 0.5,
-        torch.arange(5, device=device, dtype=torch.float32) + 0.5,
-        indexing="ij",
+    weights = torch.linspace(-0.3, 0.9, mean.numel(), device=q.device).reshape_as(mean)
+    variance_weights = weights.flip(-1).contiguous()
+    actual = getattr(_wrapper, stem + "_mean_var_bwd_per_gaussian")(
+        *values, tile_offsets, isect_ids, flatten_ids, weights, variance_weights,
+        q, detach, *dimensions, *options
     )
-    dx = xx - means3d[0, 0]
-    dy = yy - means3d[0, 1]
-    dz = zz - means3d[0, 2]
-    sigma = 0.5 * (dx * dx + dy * dy + dz * dz)
-    ref = opacity[0] * torch.exp(-sigma)
-    ref = torch.where(ref.abs() >= 1e-6, ref, torch.zeros_like(ref))
-    expected = torch.sigmoid(raw_q.detach()) * (v_var * ref.square()).sum()
-    assert torch.allclose(volume, ref, atol=1e-6, rtol=1e-6)
-    assert torch.allclose(raw_q.grad, expected.reshape_as(raw_q), atol=2e-5, rtol=2e-5)
-
-
-def test_raster_uncertainty_no_detach_geometry_gradient_matches_reference():
-    from gsplat2ct.ops.torch_autograd import _RasterizeMeanVarFunction
-
-    device = "cuda"
-    tile_offsets, flatten_ids, isect_ids = _single_tile()
-    v_img = torch.randn((1, 5, 5), device=device)
-    v_var = torch.randn((1, 5, 5), device=device)
-
-    means2d = torch.tensor([[[2.5, 2.5]]], device=device, requires_grad=True)
-    conics = torch.tensor([[[1.0, 0.1, 1.2]]], device=device, requires_grad=True)
-    opacity = torch.tensor([[2.0]], device=device, requires_grad=True)
-    mu = torch.tensor([[3.0]], device=device, requires_grad=True)
-    q = torch.tensor([0.25], device=device, requires_grad=True)
-    image, variance = _RasterizeMeanVarFunction.apply(
-        means2d,
-        conics,
-        opacity,
-        mu,
-        torch.empty(0, device=device),
-        q,
-        tile_offsets,
-        flatten_ids,
-        isect_ids,
-        5,
-        5,
-        8,
-        "gaussian",
-        False,
-        True,
-        False,
+    if operation == "rasterize":
+        actual = actual[1:]  # The first output is optional absgrad metadata.
+    # Only the independent closed-form reference participates in autograd.
+    reference_inputs = [value.detach().clone().requires_grad_() for value in values]
+    q_reference = q.detach().clone().requires_grad_()
+    reference = reference_fn(*reference_inputs)
+    contribution = reference.detach() if detach else reference
+    reference_variance = q_reference[0] * contribution.square()
+    expected = torch.autograd.grad(
+        (reference * weights + reference_variance * variance_weights).sum(),
+        reference_inputs + [q_reference],
     )
-    (image * v_img + variance * v_var).sum().backward()
-
-    means_ref = means2d.detach().clone().requires_grad_(True)
-    conics_ref = conics.detach().clone().requires_grad_(True)
-    opacity_ref = opacity.detach().clone().requires_grad_(True)
-    mu_ref = mu.detach().clone().requires_grad_(True)
-    q_ref = q.detach().clone().requires_grad_(True)
-    ref = _gaussian_raster_ref(means_ref, conics_ref, opacity_ref, mu_ref)
-    ref_var = q_ref[0] * ref.square()
-    (ref * v_img + ref_var * v_var).sum().backward()
-
-    assert torch.allclose(means2d.grad, means_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(conics.grad, conics_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(opacity.grad, opacity_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(mu.grad, mu_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(q.grad, q_ref.grad, atol=2e-5, rtol=2e-5)
-
-    beta = torch.tensor([[4.0]], device=device, requires_grad=True)
-    means2d_b = means2d.detach().clone().requires_grad_(True)
-    conics_b = conics.detach().clone().requires_grad_(True)
-    opacity_b = opacity.detach().clone().requires_grad_(True)
-    mu_b = mu.detach().clone().requires_grad_(True)
-    q_b = q.detach().clone().requires_grad_(True)
-    image, variance = _RasterizeMeanVarFunction.apply(
-        means2d_b,
-        conics_b,
-        opacity_b,
-        mu_b,
-        beta,
-        q_b,
-        tile_offsets,
-        flatten_ids,
-        isect_ids,
-        5,
-        5,
-        8,
-        "beta",
-        False,
-        True,
-        False,
-    )
-    (image * v_img + variance * v_var).sum().backward()
-
-    means_ref = means2d.detach().clone().requires_grad_(True)
-    conics_ref = conics.detach().clone().requires_grad_(True)
-    opacity_ref = opacity.detach().clone().requires_grad_(True)
-    mu_ref = mu.detach().clone().requires_grad_(True)
-    beta_ref = beta.detach().clone().requires_grad_(True)
-    q_ref = q.detach().clone().requires_grad_(True)
-    ref = _beta_raster_ref(means_ref, conics_ref, opacity_ref, mu_ref, beta_ref)
-    ref_var = q_ref[0] * ref.square()
-    (ref * v_img + ref_var * v_var).sum().backward()
-
-    assert torch.allclose(means2d_b.grad, means_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(conics_b.grad, conics_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(opacity_b.grad, opacity_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(mu_b.grad, mu_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(beta.grad, beta_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(q_b.grad, q_ref.grad, atol=2e-5, rtol=2e-5)
-
-
-def test_voxel_uncertainty_no_detach_geometry_gradient_matches_reference():
-    from gsplat2ct.ops.torch_autograd import _VoxelizeMeanVarFunction
-
-    device = "cuda"
-    tile_offsets, flatten_ids, isect_ids = _single_tile()
-    v_vol = torch.randn((5, 5, 5), device=device)
-    v_var = torch.randn((5, 5, 5), device=device)
-    zz, yy, xx = torch.meshgrid(
-        torch.arange(5, device=device, dtype=torch.float32) + 0.5,
-        torch.arange(5, device=device, dtype=torch.float32) + 0.5,
-        torch.arange(5, device=device, dtype=torch.float32) + 0.5,
-        indexing="ij",
-    )
-
-    means3d = torch.tensor([[2.5, 2.5, 2.5]], device=device, requires_grad=True)
-    conics = torch.tensor([[1.0, 0.0, 0.0, 1.0, 0.0, 1.0]], device=device, requires_grad=True)
-    opacity = torch.tensor([2.0], device=device, requires_grad=True)
-    q = torch.tensor([0.125], device=device, requires_grad=True)
-    volume, variance = _VoxelizeMeanVarFunction.apply(
-        means3d,
-        conics,
-        opacity,
-        torch.empty(0, device=device),
-        q,
-        tile_offsets,
-        flatten_ids,
-        isect_ids,
-        5,
-        5,
-        5,
-        8,
-        "gaussian",
-        True,
-        False,
-    )
-    (volume * v_vol + variance * v_var).sum().backward()
-
-    means_ref = means3d.detach().clone().requires_grad_(True)
-    conics_ref = conics.detach().clone().requires_grad_(True)
-    opacity_ref = opacity.detach().clone().requires_grad_(True)
-    q_ref = q.detach().clone().requires_grad_(True)
-    dx = xx - means_ref[0, 0]
-    dy = yy - means_ref[0, 1]
-    dz = zz - means_ref[0, 2]
-    c = conics_ref[0]
-    sigma = (
-        0.5 * (c[0] * dx * dx + c[3] * dy * dy + c[5] * dz * dz)
-        + c[1] * dx * dy
-        + c[2] * dx * dz
-        + c[4] * dy * dz
-    )
-    ref = opacity_ref[0] * torch.exp(-sigma)
-    ref = torch.where((sigma >= 0) & (ref.abs() >= 1e-6), ref, torch.zeros_like(ref))
-    ref_var = q_ref[0] * ref.square()
-    (ref * v_vol + ref_var * v_var).sum().backward()
-
-    assert torch.allclose(means3d.grad, means_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(conics.grad, conics_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(opacity.grad, opacity_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(q.grad, q_ref.grad, atol=2e-5, rtol=2e-5)
-
-    gamma = torch.tensor([3.5], device=device, requires_grad=True)
-    means_b = means3d.detach().clone().requires_grad_(True)
-    conics_b = conics.detach().clone().requires_grad_(True)
-    opacity_b = opacity.detach().clone().requires_grad_(True)
-    q_b = q.detach().clone().requires_grad_(True)
-    volume, variance = _VoxelizeMeanVarFunction.apply(
-        means_b,
-        conics_b,
-        opacity_b,
-        gamma,
-        q_b,
-        tile_offsets,
-        flatten_ids,
-        isect_ids,
-        5,
-        5,
-        5,
-        8,
-        "beta",
-        True,
-        False,
-    )
-    (volume * v_vol + variance * v_var).sum().backward()
-
-    means_ref = means3d.detach().clone().requires_grad_(True)
-    conics_ref = conics.detach().clone().requires_grad_(True)
-    opacity_ref = opacity.detach().clone().requires_grad_(True)
-    gamma_ref = gamma.detach().clone().requires_grad_(True)
-    q_ref = q.detach().clone().requires_grad_(True)
-    dx = means_ref[0, 0] - xx
-    dy = means_ref[0, 1] - yy
-    dz = means_ref[0, 2] - zz
-    c = conics_ref[0]
-    d2 = (
-        c[0] * dx * dx
-        + 2.0 * c[1] * dx * dy
-        + 2.0 * c[2] * dx * dz
-        + c[3] * dy * dy
-        + 2.0 * c[4] * dy * dz
-        + c[5] * dz * dz
-    )
-    h = 1.0 - d2
-    ref = opacity_ref[0] * h.clamp_min(0).pow(gamma_ref[0])
-    ref = torch.where((d2 >= 0) & (h > 0) & (ref.abs() >= 1e-5), ref, torch.zeros_like(ref))
-    ref_var = q_ref[0] * ref.square()
-    (ref * v_vol + ref_var * v_var).sum().backward()
-
-    assert torch.allclose(means_b.grad, means_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(conics_b.grad, conics_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(opacity_b.grad, opacity_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(gamma.grad, gamma_ref.grad, atol=2e-4, rtol=2e-4)
-    assert torch.allclose(q_b.grad, q_ref.grad, atol=2e-5, rtol=2e-5)
+    torch.testing.assert_close(mean, reference, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(variance, q[0] * reference.square(), atol=1e-6, rtol=1e-6)
+    assert len(actual) == len(expected)
+    for actual_gradient, expected_gradient in zip(actual, expected):
+        torch.testing.assert_close(actual_gradient, expected_gradient, atol=2e-4, rtol=2e-4)

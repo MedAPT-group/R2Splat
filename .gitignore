@@ -1,41 +1,23 @@
-# ============== 激活环境相关 ==============
-activate_env_cu121.sh
-
-# ============== Python 相关忽略 ==============
-# Python 缓存文件夹
+# Python and test caches
 __pycache__/
-# Python 编译文件
-*.pyc
-*.pyo
-*.pyd
-*.so
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
 
-# ============== 你的项目专属文件 ==============
-# 项目打包信息（你目录里已有的 gsplat2ct.egg-info）
+# Package and native build outputs
 *.egg-info/
-gsplat2ct.egg-info/
-# 输出目录
-output/
-
-# ============== CUDA / C++ 编译文件 ==============
-# CUDA 编译产物
-csrc/build/
-*.o
-*.cu.o
 build/
 dist/
+*.so
+*.o
+*.a
 
-# ============== 编辑器 / 系统临时文件 ==============
-# VS Code / PyCharm
+# Local environments and editors
+.venv/
+venv/
+.env
 .vscode/
 .idea/
-# Mac 系统文件
 .DS_Store
-# 日志文件
 *.log
-logs
-
-# ============== wandb / sweep ==============
-wandb/
-slurm*.out
-slurm_logs

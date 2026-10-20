@@ -1,0 +1,11 @@
+include README.md CONTRIBUTING.md LICENSE requirements.txt pyproject.toml
+include THIRD_PARTY_NOTICES*
+include third_party/gsplat/LICENSE
+recursive-include r2splat/cuda/csrc *.cpp *.cu *.h
+recursive-include r2splat/cuda/include *.h *.cuh
+recursive-include examples *.py
+recursive-include tests *.py
+recursive-include docs *.md
+prune build
+prune dist
+global-exclude __pycache__ *.py[cod] *.so *.o

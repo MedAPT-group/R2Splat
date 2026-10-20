@@ -1,122 +1,79 @@
-"""Build script for gsplat2ct.
+"""Build the r2splat CUDA extension against the installed PyTorch."""
 
-Install for development with:
-
-    pip install -e . --no-build-isolation
-
-CUDA sources are compiled during installation. If CUDA/C++ sources change,
-run the install command again.
-"""
-
-import glob
 import os
-import os.path as osp
-import pathlib
+from pathlib import Path
 
 from setuptools import find_packages, setup
 
-MAX_JOBS = os.getenv("MAX_JOBS")
-WITH_SYMBOLS = os.getenv("WITH_SYMBOLS", "0") == "1"
-
-if MAX_JOBS is None:
-    os.environ["MAX_JOBS"] = "10"
+ROOT = Path(__file__).parent.resolve()
+BUILD_NO_CUDA = os.environ.get("BUILD_NO_CUDA", "0") == "1"
+WITH_SYMBOLS = os.environ.get("WITH_SYMBOLS", "0") == "1"
 
 
-def _ensure_cuda_arch_list():
-    """Build for both the requested arch list and the visible local GPUs."""
-    try:
-        import torch
-    except Exception:
-        return
+def cuda_extension():
+    from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-    archs = []
-    raw = os.environ.get("TORCH_CUDA_ARCH_LIST", "")
-    for item in raw.replace(",", ";").replace(" ", ";").split(";"):
-        item = item.strip()
-        if item and item not in archs:
-            archs.append(item)
-
-    if torch.cuda.is_available():
-        for idx in range(torch.cuda.device_count()):
-            major, minor = torch.cuda.get_device_capability(idx)
-            arch = f"{major}.{minor}"
-            if arch not in archs:
-                archs.append(arch)
-
-    if archs:
-        os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(archs)
-
-
-def get_ext():
-    from torch.utils.cpp_extension import BuildExtension
-
-    return BuildExtension.with_options(use_ninja=True)
-
-
-def get_extensions():
-    from torch.utils.cpp_extension import CUDAExtension
-
-    _ensure_cuda_arch_list()
-
-    current_dir = pathlib.Path(__file__).parent.resolve()
-    csrc_dir = osp.join(current_dir, "gsplat2ct", "cuda", "csrc")
-    sources = sorted(glob.glob(osp.join(csrc_dir, "*.cu"))) + sorted(
-        glob.glob(osp.join(csrc_dir, "*.cpp"))
+    os.environ.setdefault("MAX_JOBS", "10")
+    source_dir = Path("r2splat") / "cuda" / "csrc"
+    sources = sorted(
+        path.as_posix()
+        for pattern in ("*.cpp", "*.cu")
+        for path in source_dir.glob(pattern)
     )
+    extension = CUDAExtension(
+        name="r2splat.csrc",
+        sources=sources,
+        include_dirs=[str(ROOT / "r2splat" / "cuda" / "include")],
+        extra_compile_args={
+            "cxx": ["-O3", "-std=c++17"],
+            "nvcc": [
+                "-O3",
+                "--use_fast_math",
+                "-std=c++17",
+                "--expt-relaxed-constexpr",
+            ],
+        },
+        extra_link_args=[] if WITH_SYMBOLS else ["-s"],
+    )
+    # Ninja is the default; older PyTorch forwards explicit options to distutils.
+    return [extension], {"build_ext": BuildExtension}
 
-    return [
-        CUDAExtension(
-            name="gsplat2ct.csrc",
-            sources=sources,
-            include_dirs=[osp.join(current_dir, "gsplat2ct", "cuda", "include")],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-                "nvcc": [
-                    "-O3",
-                    "--use_fast_math",
-                    "-std=c++17",
-                    "--expt-relaxed-constexpr",
-                ],
-            },
-            extra_link_args=[] if WITH_SYMBOLS else ["-s"],
-        )
-    ]
 
-
-def get_long_description():
-    readme_path = pathlib.Path(__file__).parent / "README.md"
-    if readme_path.exists():
-        return readme_path.read_text(encoding="utf-8")
-    return ""
-
+# This opt-out supports metadata, source distributions, and CPU-side API tests.
+# It does not provide a CPU implementation of the CUDA operators.
+ext_modules, cmdclass = ([], {}) if BUILD_NO_CUDA else cuda_extension()
 
 setup(
-    name="gsplat2ct",
+    name="r2splat",
     version="0.1.0",
     author="Dy164",
-    description="Fast first-order 3D Gaussian Splatting for CT reconstruction",
-    long_description=get_long_description(),
+    description="Differentiable CUDA operators for Gaussian and Beta CT splatting",
+    long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
-    packages=find_packages(),
-    python_requires=">=3.8",
-    install_requires=[
-        "torch>=2.0.0",
-        "numpy",
-        "hydra-core>=1.3",
-        "omegaconf>=2.3",
-        "matplotlib",
-        "tqdm",
-    ],
-    extras_require={"dev": ["pytest", "black", "isort", "pylint"]},
-    ext_modules=get_extensions(),
-    cmdclass={"build_ext": get_ext()},
+    license_expression="Apache-2.0",
+    license_files=["LICENSE", "THIRD_PARTY_NOTICES*", "third_party/gsplat/LICENSE"],
+    packages=find_packages(include=["r2splat", "r2splat.*"]),
+    include_package_data=True,
+    package_data={
+        "r2splat": [
+            "cuda/csrc/*.cpp",
+            "cuda/csrc/*.cu",
+            "cuda/csrc/*.h",
+            "cuda/include/*.h",
+            "cuda/include/*.cuh",
+        ],
+    },
+    python_requires=">=3.9",
+    install_requires=["torch>=2.0"],
+    extras_require={"dev": ["pytest>=7"]},
+    ext_modules=ext_modules,
+    cmdclass=cmdclass,
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: C++",
+        "Operating System :: POSIX :: Linux",
     ],
 )

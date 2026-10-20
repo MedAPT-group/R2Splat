@@ -1,6 +1,0 @@
-enabled: true
-
-lr:
-  type: "exp"
-  warmup_steps: 0
-  min_factor: 0.1
